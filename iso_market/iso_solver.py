@@ -73,7 +73,3 @@ class DCOPF:
             'shadow_price_23': shadow_price_23,
             'production_cost': total_cost
         }
-    
-
-
-#IPOPT for collusion case - Nitro 
