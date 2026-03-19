@@ -1,26 +1,23 @@
 import numpy as np
 
-# 1. Network Parameters from Table 1
+# 1. Network Parameters from Table 1 (Liu & Hobbs 2013)
 P0 = np.array([40, 35, 32, 30, 40])
 Q0 = np.array([250, 200, 320, 300, 200])
 
-# Marginal costs for Firm 1 (Nodes 1, 2) and Firm 2 (Node 2)
+# Marginal and quadratic cost coefficients: C(g) = MC*g + 0.5*QC*g^2
 MC = {
     'Firm1_Node1': 15.0,
     'Firm1_Node2': 15.0,
     'Firm2_Node2': 18.0
 }
-
-# Thermal limits for critical arcs
-LINE_LIMITS = {
-    'line_1_2': 40.0,  # Line 0 (Node 1-2)
-    'line_2_3': 40.0,  # Line 1 (Node 2-3)
-    'line_1_3': 40.0,  # Line 2 (Node 1-3) -- Note: check your line indexing order!
-    'line_3_4': 40.0,  # Line 3 (Node 3-4)
-    'line_4_5': 30.0   # Line 4 (Node 4-5)
+QC = {
+    'Firm1_Node1': 0.02,
+    'Firm1_Node2': 0.02,
+    'Firm2_Node2': 0.01
 }
 
-import numpy as np
+# Thermal limits: Line indices 0:(1-2), 1:(2-3), 2:(3-1), 3:(3-4), 4:(4-5)
+LINE_LIMITS = np.array([40.0, 40.0, 40.0, 40.0, 30.0])
 
 def get_ptdf_matrix():
     # 1. Define Topology: (From, To) using 0-based indexing

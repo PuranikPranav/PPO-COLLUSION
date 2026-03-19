@@ -7,7 +7,7 @@ import os
 # Add the parent directory (PPO-COLLUSION) to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iso_market.node_network import P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC
+from iso_market.node_network import P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC, QC
 
 class DCOPF:
     def __init__(self):
@@ -58,8 +58,10 @@ class DCOPF:
         # LMPs = Price at each node (Derivative of welfare w.r.t. demand)
         lmps = P0 - (P0 / Q0) * d.value
         
-        # Shadow Price extraction
-        shadow_price_23 = flow_limit_con.dual_value[1] if flow_limit_con.dual_value is not None else 0.0
+        # Shadow Price: difference of upper and lower bound duals on line 2-3
+        lam_max = flow_limit_con.dual_value[1] if flow_limit_con.dual_value is not None else 0.0
+        lam_min = flow_limit_min.dual_value[1] if flow_limit_min.dual_value is not None else 0.0
+        shadow_price_23 = lam_max - lam_min
         
         # Total System Production Cost
         total_cost = (gen_dict['Firm1_Node1'] * MC['Firm1_Node1'] + 

@@ -1,0 +1,32 @@
+set NODES := 1 2 3 4 5;
+set FIRMS := F1 F2;
+set PLANTS := F1 1  F1 2  F2 2;
+
+param P0 := 
+1 40  
+2 35  
+3 32  
+4 30  
+5 40;
+
+param Q0 := 
+1 250 
+2 200 
+3 320 
+4 300 
+5 200;
+
+param MC := 
+F1 1 15  
+F1 2 15  
+F2 2 18;
+
+param QC := 
+F1 1 0.02 
+F1 2 0.02 
+F2 2 0.01;
+
+param CAP := 
+F1 1 150 
+F1 2 50 
+F2 2 100;

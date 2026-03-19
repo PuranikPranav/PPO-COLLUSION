@@ -3,11 +3,11 @@ import numpy as np
 import cvxpy as cp
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from iso_market.node_network import get_ptdf_matrix
+from iso_market.node_network import P0, Q0, get_ptdf_matrix, MC, QC
 
-# --- INPUT DATA (From Liu & Hobbs Table 1) ---
-P0_VALS = np.array([40.0, 35.0, 32.0, 30.0, 40.0])
-Q0_VALS = np.array([250.0, 200.0, 320.0, 300.0, 200.0])
+# Aliases for clarity within this file
+P0_VALS = P0.astype(float)
+Q0_VALS = Q0.astype(float)
 
 
 class EquilibriumSolver:
@@ -30,7 +30,9 @@ class EquilibriumSolver:
         # Objective: Total Welfare (Benefit - Cost)
         # Benefit_i = P0_i * d_i - 0.5 * (P0_i / Q0_i) * d_i^2
         benefit = cp.sum(cp.multiply(P0_VALS, d) - 0.5 * cp.multiply(P0_VALS / Q0_VALS, cp.square(d)))
-        cost = (15*g1_n1 + 0.01*g1_n1**2) + (15*g1_n2 + 0.01*g1_n2**2) + (18*g2_n2 + 0.005*g2_n2**2)
+        cost = (MC['Firm1_Node1']*g1_n1 + 0.5*QC['Firm1_Node1']*g1_n1**2) + \
+               (MC['Firm1_Node2']*g1_n2 + 0.5*QC['Firm1_Node2']*g1_n2**2) + \
+               (MC['Firm2_Node2']*g2_n2 + 0.5*QC['Firm2_Node2']*g2_n2**2)
 
         # Net Injection Vector: Node 1 has g1_n1, Node 2 has g1_n2 + g2_n2, Nodes 3-5 have no generators
         y = cp.hstack([g1_n1 - d[0], g1_n2 + g2_n2 - d[1], -d[2], -d[3], -d[4]])
@@ -53,7 +55,11 @@ class EquilibriumSolver:
         # LMPs: Derivative of welfare w.r.t. demand at each node
         lmps = P0_VALS - (P0_VALS / Q0_VALS) * d.value
 
+        # Quantity-weighted average price (as defined in Liu & Hobbs footnote 14)
+        avg_price = np.sum(lmps * d.value) / np.sum(d.value)
+
         print(f"  > Solver Status: {prob.status}")
+        print(f"  > Avg Price (qty-weighted): ${avg_price:.2f} / MWh  [Paper: ~23.47]")
 
         print("\n  --- GENERATION QUANTITIES (MW) ---")
         print(f"  Firm 1 (Node 1): {g1_n1.value:.2f} MW")
@@ -92,6 +98,7 @@ class EquilibriumSolver:
             'g_f2_n2': g2_n2.value,
             'd': d.value,
             'lmps': lmps,
+            'avg_price': avg_price,
             'flows': flows.value,
             'shadow_price_23': shadow_price_23,
         }
@@ -117,9 +124,9 @@ class UnconstrainedEquilibriumSolver:
         # Benefit_i = P0_i * d_i - 0.5 * (P0_i / Q0_i) * d_i^2
         benefit = cp.sum(cp.multiply(P0_VALS, d) - 0.5 * cp.multiply(P0_VALS / Q0_VALS, cp.square(d)))
 
-        cost = (15*g1_n1 + 0.01*g1_n1**2) + \
-               (15*g1_n2 + 0.01*g1_n2**2) + \
-               (18*g2_n2 + 0.005*g2_n2**2)
+        cost = (MC['Firm1_Node1']*g1_n1 + 0.5*QC['Firm1_Node1']*g1_n1**2) + \
+               (MC['Firm1_Node2']*g1_n2 + 0.5*QC['Firm1_Node2']*g1_n2**2) + \
+               (MC['Firm2_Node2']*g2_n2 + 0.5*QC['Firm2_Node2']*g2_n2**2)
 
         # Global Power Balance (Copper Plate): Total Supply == Total Demand
         c_global_balance = (g1_n1 + g1_n2 + g2_n2 == cp.sum(d))
