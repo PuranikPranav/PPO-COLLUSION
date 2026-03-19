@@ -2,3 +2,5 @@ solve;
 display g;
 display y;
 display mu;
+display lambda_plus;
+display lambda_minus;
