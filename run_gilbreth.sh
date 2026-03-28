@@ -1,4 +1,7 @@
 #!/bin/bash
+# Run from the repository root (so experiments/ and results/ resolve correctly):
+#   cd /path/to/ppo-collusion && sbatch run_gilbreth.sh
+# Optional: sbatch run_gilbreth.sh "1 2"   — default is H = 1 2 3
 #SBATCH --job-name=ppo-collusion
 #SBATCH --account=liu334
 #SBATCH --partition=a100-40gb
@@ -14,6 +17,7 @@
 # History lengths to run (override with first arg, e.g. sbatch run_gilbreth.sh "1 2 3")
 H_LIST="${1:-1 2 3}"
 
+set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 export PYTHONUNBUFFERED=1
 
@@ -75,14 +79,14 @@ for H in $H_LIST; do
 done
 
 # ── Cross-history comparison figure ──────────────────────────────────
-RUN_DIRS=""
+RUN_DIRS=()
 for H in $H_LIST; do
     if [ -d "results/h${H}" ]; then
-        RUN_DIRS="$RUN_DIRS results/h${H}"
+        RUN_DIRS+=("results/h${H}")
     fi
 done
-if [ -n "$RUN_DIRS" ]; then
-    python experiments/plot_results.py --compare $RUN_DIRS --save "figures/"
+if [ "${#RUN_DIRS[@]}" -gt 0 ]; then
+    python experiments/plot_results.py --compare "${RUN_DIRS[@]}" --save "figures/"
     echo "Comparison figure saved to figures/"
 fi
 

@@ -2,8 +2,8 @@
 Multi-Agent Independent PPO for studying tacit collusion in electricity markets.
 
 Methodology adapted from Calvano, Calzolari, Denicolò & Pastorello (2021):
-  - Normalized collusion metric Δ = (π − πC) / (πM − πC)
-  - Convergence criterion: Δ stable for N consecutive PPO updates
+  - Normalized collusion metric Δ = (π − πC) / (πM − πC) (logged / analyzed, not the stop rule)
+  - Convergence criterion: policy KL below --kl-threshold for N consecutive PPO updates
   - Multiple independent sessions with different seeds, averaged
   - Post-training analysis: limit strategy + impulse response to deviation
 
@@ -12,9 +12,10 @@ Usage
     # Quick single run
     python experiments/ppo.py --history-len 1 --total-timesteps 500000
 
-    # Full Calvano-style experiment (50 sessions, convergence-based stopping)
+    # Full Calvano-style experiment (50 sessions, KL-based convergence stopping)
     python experiments/ppo.py --history-len 1 --num-sessions 50 \
-        --convergence-patience 50 --total-timesteps 2000000 --output-dir results/h1
+        --convergence-patience 100 --kl-threshold 0.01 --total-timesteps 2000000 \
+        --output-dir results/h1
 """
 
 import argparse
@@ -359,7 +360,7 @@ def compute_delta(avg_step_profit: float, pi_c: float, pi_m: float) -> float:
 # Post-training analysis
 # ======================================================================
 def build_reference_obs(env, benchmarks, num_points=20):
-    """Grid of observations spanning plausible LMP range, for convergence check."""
+    """Grid of observations spanning plausible LMP range (limit-strategy sweep)."""
     comp_lmps = np.array(benchmarks["competitive"]["lmps"])
     comp_avg = np.mean(comp_lmps)
     targets = np.linspace(15, 38, num_points)
@@ -495,7 +496,7 @@ def train_session(env, benchmarks, args, session_id, device):
     # Convergence tracking — KL divergence between consecutive policies
     use_convergence = args.convergence_patience > 0
     stable_count = 0
-    last_agent_kls = {fid: float('inf') for fid in range(NUM_FIRMS)}
+    last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
 
     # Logging
     log_rows = []
@@ -550,20 +551,19 @@ def train_session(env, benchmarks, args, session_id, device):
                 episode_count += 1
                 obs = env.reset()
 
-        # ---------- snapshot old policies for KL convergence check ----------
+        # ---------- snapshot policies before update (KL metrics + optional convergence) ----------
         old_policy_snapshots = {}
-        if use_convergence:
-            for fid, agent in agents.items():
-                with torch.no_grad():
-                    obs_buf = torch.from_numpy(
-                        agent.buffer.obs[:agent.buffer.ptr]
-                    ).to(agent.device)
-                    old_dist = agent.ac.policy(obs_buf)
-                    old_policy_snapshots[fid] = {
-                        'obs': obs_buf,
-                        'mean': old_dist.loc.clone(),
-                        'std': old_dist.scale.clone(),
-                    }
+        for fid, agent in agents.items():
+            with torch.no_grad():
+                obs_buf = torch.from_numpy(
+                    agent.buffer.obs[:agent.buffer.ptr]
+                ).to(agent.device)
+                old_dist = agent.ac.policy(obs_buf)
+                old_policy_snapshots[fid] = {
+                    "obs": obs_buf,
+                    "mean": old_dist.loc.clone(),
+                    "std": old_dist.scale.clone(),
+                }
 
         # ---------- PPO update ----------
         for fid, agent in agents.items():
@@ -576,16 +576,16 @@ def train_session(env, benchmarks, args, session_id, device):
                 vf_coef=args.vf_coef, max_grad_norm=args.max_grad_norm,
             )
 
-        # ---------- convergence check (KL divergence) ----------
-        if use_convergence:
-            for fid in agents:
-                with torch.no_grad():
-                    snap = old_policy_snapshots[fid]
-                    new_dist = agents[fid].ac.policy(snap['obs'])
-                    old_dist = Normal(snap['mean'], snap['std'])
-                    kl = torch.distributions.kl_divergence(old_dist, new_dist)
-                    last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
+        # ---------- KL vs previous policy (always, for logs; convergence uses same values) ----------
+        for fid in agents:
+            with torch.no_grad():
+                snap = old_policy_snapshots[fid]
+                new_dist = agents[fid].ac.policy(snap["obs"])
+                old_dist = Normal(snap["mean"], snap["std"])
+                kl = torch.distributions.kl_divergence(old_dist, new_dist)
+                last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
+        if use_convergence:
             max_kl = max(last_agent_kls.values())
             if max_kl < args.kl_threshold:
                 stable_count += 1

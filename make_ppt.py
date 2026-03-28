@@ -251,22 +251,23 @@ add_text_box(slide, 1, 6.0, 11, 1.0,
 # ──────────────────────────────────────────────────────────────────────
 slide = prs.slides.add_slide(prs.slide_layouts[6])
 add_bg(slide)
-add_text_box(slide, 0.8, 0.4, 11, 0.8, "Convergence: \u0394-Stability Criterion", font_size=32, bold=True, color=ACCENT)
+add_text_box(slide, 0.8, 0.4, 11, 0.8, "Convergence: policy KL criterion", font_size=32, bold=True, color=ACCENT)
 add_accent_bar(slide)
 
 add_bullet_slide(slide, 0.8, 1.5, 11, 2.5, [
     "Calvano (Q-learning): greedy action unchanged at all states for 100,000 consecutive periods",
-    "Our adaptation for continuous PPO actions:",
-    "    After each PPO update, compute \u0394 for both firms from recent episode profits",
-    "    If max |\u0394_new \u2013 \u0394_old| < 0.02 for all firms: increment stable_count",
-    "    If stable_count \u2265 50 consecutive updates (~102K steps): declare converged",
+    "Our adaptation for continuous PPO (Gaussian policies):",
+    "    Before each PPO update, snapshot \u03c0_old(a|s) on the rollout observations",
+    "    After the update, compute KL(\u03c0_old || \u03c0_new), averaged over states and summed over action dims",
+    "    If max KL across both firms < threshold: increment stable_count; else reset",
+    "    If stable_count \u2265 100 consecutive PPO updates: declare converged (Gilbreth default)",
 ], font_size=18, color=GRAY_TEXT)
 
-add_text_box(slide, 0.8, 4.5, 11, 0.5, "Why not MW-based?", font_size=20, bold=True, color=DARK)
+add_text_box(slide, 0.8, 4.5, 11, 0.5, "\u0394 is still logged (not the stop rule)", font_size=20, bold=True, color=DARK)
 add_bullet_slide(slide, 0.8, 5.1, 11, 2.0, [
-    "Continuous policies always drift slightly in raw output (\u00b10.1\u20132 MW per update)",
-    "Calvano's discrete argmax either flips or doesn't \u2014 binary check. Not possible with continuous actions.",
-    "\u0394-stability checks the economic outcome directly: has the profit level settled?",
+    "Normalized collusion index \u0394 = (\u03c0 \u2212 \u03c0_C) / (\u03c0_M \u2212 \u03c0_C) is reported each log step for Calvano-style analysis",
+    "KL measures whether the learned policy has stopped moving; \u0394 measures economic distance to benchmarks",
+    "Continuous actions drift in MW; policy-distribution KL is a standard PPO-style stability signal",
 ], font_size=16, color=GRAY_TEXT)
 
 

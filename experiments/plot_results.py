@@ -1,16 +1,20 @@
 """
 Calvano-style plots for PPO collusion experiments.
 
-Generates four figures:
-  1. Evolution of generation quantities (cf. Calvano Fig 1)
-  2. Evolution of Δ normalized profit gain (cf. Calvano Fig 2)
-  3. Learned limit strategy: generation vs observed LMP (cf. Calvano Fig 3)
-  4. Impulse response after forced deviation (cf. Calvano Fig 4)
+Per run directory (2x3 figure):
+  1. Generation evolution
+  2. Δ (normalized profit gain)
+  3. Policy KL divergence (old → new after each PPO update)
+  4. Learned limit strategy
+  5–6. Impulse responses (each firm deviates)
+
+Cross-history comparison (--compare):
+  Overlays H=1,2,… on Δ, LMP, max KL, and generation.
 
 Usage
 -----
-    python experiments/plot_results.py results/h1
-    python experiments/plot_results.py results/h1 results/h3 --save figures/
+    python experiments/plot_results.py results/h1 --save figures/
+    python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
 """
 
 import argparse
@@ -86,7 +90,7 @@ def plot_generation(ax, config, sessions, label_suffix=""):
     mono_g0 = mono_gens[0] + mono_gens[1]
     mono_g1 = mono_gens[2]
 
-    for fid, (comp_g, mono_g) in enumerate([(comp_g0, comp_g0), (comp_g1, comp_g1)]):
+    for fid, (_comp_g, _mono_g) in enumerate([(comp_g0, mono_g0), (comp_g1, mono_g1)]):
         steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_avg_gen")
         if not steps:
             continue
@@ -199,15 +203,24 @@ def plot_impulse_response(axes, config, sessions):
 
 
 # ====================== Figure 5: KL divergence evolution ======================
+def _positive_series_for_log(y, lo=1e-12):
+    """Avoid log-scale warnings / invalid values from zeros or missing metrics."""
+    y = np.asarray(y, dtype=float)
+    return np.clip(y, lo, None)
+
+
 def plot_kl(ax, config, sessions, label_suffix=""):
     for fid in range(2):
         steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_kl")
         if not steps:
             continue
         color = f"C{fid}"
-        ax.plot(steps, mean, color=color, label=f"Firm {fid}{label_suffix}")
+        m = _positive_series_for_log(mean)
+        ax.plot(steps, m, color=color, label=f"Firm {fid}{label_suffix}")
         if len(sessions) > 1:
-            ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
+            s_lo = _positive_series_for_log(mean - std)
+            s_hi = _positive_series_for_log(mean + std)
+            ax.fill_between(steps, s_lo, s_hi, alpha=0.15, color=color)
 
     kl_thresh = config.get("kl_threshold", 0.01)
     ax.axhline(kl_thresh, ls="--", color="red", alpha=0.5, linewidth=0.8,
@@ -296,9 +309,16 @@ def plot_comparison(run_dirs, save_dir=None):
         color = colors_h[str(h)]
         steps, mean, std = aggregate_metric(sessions, "max_kl")
         if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
+            m = _positive_series_for_log(mean)
+            ax.plot(steps, m, color=color, label=f"H={h}")
             if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+                ax.fill_between(
+                    steps,
+                    _positive_series_for_log(mean - std),
+                    _positive_series_for_log(mean + std),
+                    alpha=0.1,
+                    color=color,
+                )
     kl_thresh = runs[0][0].get("kl_threshold", 0.01)
     ax.axhline(kl_thresh, ls="--", color="red", alpha=0.5, linewidth=0.8,
                label=f"Threshold ({kl_thresh})")
@@ -362,14 +382,18 @@ def main():
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
     args = parser.parse_args()
 
-    if not args.run_dirs:
+    run_dirs = [rd for rd in args.run_dirs if rd is not None and str(rd).strip()]
+    if not run_dirs:
         parser.error("Provide at least one run directory.")
 
     if args.compare:
-        plot_comparison(args.run_dirs, save_dir=args.save)
+        missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
+        if missing:
+            parser.error(f"Not a directory: {', '.join(missing)}")
+        plot_comparison(run_dirs, save_dir=args.save)
         return
 
-    for rd in args.run_dirs:
+    for rd in run_dirs:
         config, sessions = load_sessions(rd)
         h = config.get("history_len", "?")
         n = len(sessions)
