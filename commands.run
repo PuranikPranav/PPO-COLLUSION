@@ -1,6 +1,34 @@
+option display_precision 6;
+option display_width 100;
+
 solve;
+
+printf "\n=== Generation g (MW) ===\n";
 display g;
+
+printf "\n=== ISO dispatch y (MW; paper hub-spoke) ===\n";
 display y;
+
+printf "\n=== Balance multiplier mu ($/MWh, hub-scale ref node 5 in PTDF) ===\n";
 display mu;
-display lambda_plus;
-display lambda_minus;
+
+printf "\n=== Capacity duals rho ===\n";
+display rho;
+
+printf "\n=== LMP / nodal price ($/MWh) ===\n";
+display {i in NODES} (P0[i] - (P0[i]/Q0[i]) * (sum {ff in FIRMS: (ff,i) in PLANTS} g[ff,i] + y[i]));
+
+printf "\n=== Average price (paper fn.14): sum_i p_i*(G_i+y_i) / sum_i G_i ===\n";
+param avg_price;
+let avg_price := (sum {i in NODES} (P0[i] - (P0[i]/Q0[i]) * (sum {ff in FIRMS: (ff,i) in PLANTS} g[ff,i] + y[i])) * (sum {ff in FIRMS: (ff,i) in PLANTS} g[ff,i] + y[i])) / sum {(ff,ii) in PLANTS} g[ff,ii];
+display avg_price;
+
+printf "\n=== Transmission: f_k = -sum_i PTDF[k,i]*y[i] (MW); T_k; duals ($/MWh) ===\n";
+printf "k  line    flow        T   lam+      lam-      net(lam--lam+)\n";
+printf "------------------------------------------------------------\n";
+for {kk in LINKS} {
+  printf "%2g  %-6s %9.4f  %3g  %9.4f %9.4f %9.4f\n",
+    kk, line_name[kk],
+    (- sum {j in NODES} PTDF[kk,j]*y[j]), T[kk],
+    lambda_plus[kk], lambda_minus[kk], (lambda_minus[kk]-lambda_plus[kk]);
+}

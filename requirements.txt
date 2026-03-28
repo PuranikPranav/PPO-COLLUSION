@@ -1,0 +1,6 @@
+numpy
+torch
+cvxpy
+clarabel
+scipy
+matplotlib

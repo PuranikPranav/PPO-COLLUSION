@@ -1,7 +1,7 @@
 import numpy as np
 
 # 1. Network Parameters from Table 1 (Liu & Hobbs 2013)
-P0 = np.array([40, 35, 32, 30, 40])
+P0 = np.array([40, 35, 32, 30, 40]) #not constant elasticity
 Q0 = np.array([250, 200, 320, 300, 200])
 
 # Marginal and quadratic cost coefficients: C(g) = MC*g + 0.5*QC*g^2
