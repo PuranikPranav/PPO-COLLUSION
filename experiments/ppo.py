@@ -492,10 +492,10 @@ def train_session(env, benchmarks, args, session_id, device):
         )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
-    # Convergence tracking — Δ-based (Calvano analogue for continuous actions)
+    # Convergence tracking — KL divergence between consecutive policies
     use_convergence = args.convergence_patience > 0
-    prev_delta = None
     stable_count = 0
+    last_agent_kls = {fid: float('inf') for fid in range(NUM_FIRMS)}
 
     # Logging
     log_rows = []
@@ -550,6 +550,21 @@ def train_session(env, benchmarks, args, session_id, device):
                 episode_count += 1
                 obs = env.reset()
 
+        # ---------- snapshot old policies for KL convergence check ----------
+        old_policy_snapshots = {}
+        if use_convergence:
+            for fid, agent in agents.items():
+                with torch.no_grad():
+                    obs_buf = torch.from_numpy(
+                        agent.buffer.obs[:agent.buffer.ptr]
+                    ).to(agent.device)
+                    old_dist = agent.ac.policy(obs_buf)
+                    old_policy_snapshots[fid] = {
+                        'obs': obs_buf,
+                        'mean': old_dist.loc.clone(),
+                        'std': old_dist.scale.clone(),
+                    }
+
         # ---------- PPO update ----------
         for fid, agent in agents.items():
             obs_norm = obs_normalizers[fid].normalize(obs[fid])
@@ -561,26 +576,21 @@ def train_session(env, benchmarks, args, session_id, device):
                 vf_coef=args.vf_coef, max_grad_norm=args.max_grad_norm,
             )
 
-        # ---------- convergence check (Δ-based) ----------
-        if use_convergence and episode_count > 0:
-            curr_delta = {}
-            for fid in range(NUM_FIRMS):
-                if recent_profits[fid]:
-                    avg_step = float(np.mean(recent_profits[fid])) / args.episode_len
-                    curr_delta[fid] = compute_delta(avg_step, pi_c[fid], pi_m[fid])
-                else:
-                    curr_delta[fid] = 0.0
+        # ---------- convergence check (KL divergence) ----------
+        if use_convergence:
+            for fid in agents:
+                with torch.no_grad():
+                    snap = old_policy_snapshots[fid]
+                    new_dist = agents[fid].ac.policy(snap['obs'])
+                    old_dist = Normal(snap['mean'], snap['std'])
+                    kl = torch.distributions.kl_divergence(old_dist, new_dist)
+                    last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
-            if prev_delta is not None:
-                max_change = max(
-                    abs(curr_delta[fid] - prev_delta[fid])
-                    for fid in range(NUM_FIRMS)
-                )
-                if max_change < args.convergence_threshold:
-                    stable_count += 1
-                else:
-                    stable_count = 0
-            prev_delta = {fid: v for fid, v in curr_delta.items()}
+            max_kl = max(last_agent_kls.values())
+            if max_kl < args.kl_threshold:
+                stable_count += 1
+            else:
+                stable_count = 0
 
             if stable_count >= args.convergence_patience:
                 converged = True
@@ -602,21 +612,26 @@ def train_session(env, benchmarks, args, session_id, device):
                 row[f"firm_{fid}_ep_profit"] = ep_prof
                 row[f"firm_{fid}_avg_gen"] = avg_gen
                 row[f"firm_{fid}_delta"] = float(delta)
+                row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
+            row["max_kl"] = max(last_agent_kls.values())
+            row["kl_streak"] = stable_count
             log_rows.append(row)
 
             if args.num_sessions == 1:
                 d0 = row.get("firm_0_delta", 0)
                 d1 = row.get("firm_1_delta", 0)
+                mk = row.get("max_kl", 0)
                 print(
                     f"[{total_steps:>8d}] ep {episode_count:>4d} | "
                     f"LMP ${row['avg_lmp']:.2f} | "
                     f"Δ0={d0:.3f} Δ1={d1:.3f} | "
-                    f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f}"
+                    f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
+                    f"KL={mk:.2e} streak={stable_count}"
                 )
 
         if converged:
             if args.num_sessions == 1:
-                print(f"  ✓ Converged at step {total_steps} (stable for {args.convergence_patience} updates)")
+                print(f"  ✓ Converged at step {total_steps} (KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates)")
             break
 
     # ---------- post-training analysis ----------
@@ -775,9 +790,9 @@ def parse_args():
     p.add_argument("--num-sessions", type=int, default=1,
                    help="Independent training sessions (paper uses 1000)")
     p.add_argument("--convergence-patience", type=int, default=0,
-                   help="Stop when Δ stable for N PPO updates (0=disabled, use fixed timesteps)")
-    p.add_argument("--convergence-threshold", type=float, default=0.02,
-                   help="Max Δ change between PPO updates to consider stable")
+                   help="Stop when policy KL < threshold for N consecutive PPO updates (0=disabled)")
+    p.add_argument("--kl-threshold", type=float, default=0.01,
+                   help="KL divergence threshold for policy convergence")
 
     # System
     p.add_argument("--cuda", action="store_true")
