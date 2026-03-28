@@ -198,32 +198,191 @@ def plot_impulse_response(axes, config, sessions):
         ax.legend(fontsize=8)
 
 
+# ====================== Figure 5: KL divergence evolution ======================
+def plot_kl(ax, config, sessions, label_suffix=""):
+    for fid in range(2):
+        steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_kl")
+        if not steps:
+            continue
+        color = f"C{fid}"
+        ax.plot(steps, mean, color=color, label=f"Firm {fid}{label_suffix}")
+        if len(sessions) > 1:
+            ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
+
+    kl_thresh = config.get("kl_threshold", 0.01)
+    ax.axhline(kl_thresh, ls="--", color="red", alpha=0.5, linewidth=0.8,
+               label=f"KL threshold ({kl_thresh})")
+    ax.set_ylabel("KL divergence")
+    ax.set_yscale("log")
+    ax.set_title("Policy KL Divergence (old → new)")
+    ax.legend(fontsize=8)
+
+
+# ====================== Comparison across history lengths ======================
+def plot_comparison(run_dirs, save_dir=None):
+    """Generate a single figure comparing key metrics across history lengths."""
+    runs = []
+    for rd in run_dirs:
+        config, sessions = load_sessions(rd)
+        if sessions:
+            runs.append((config, sessions))
+
+    if not runs:
+        print("No valid run directories found for comparison.")
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    h_labels = [str(c.get("history_len", "?")) for c, _ in runs]
+    fig.suptitle(f"Cross-History Comparison — H={', '.join(h_labels)}", fontsize=14)
+
+    colors_h = {str(c.get("history_len", i)): f"C{i}" for i, (c, _) in enumerate(runs)}
+
+    # --- (0,0): Δ evolution per H (Firm 0) ---
+    ax = axes[0, 0]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_0_delta")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
+    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
+    ax.set_ylabel("Δ (Firm 0)")
+    ax.set_title("Collusion Index Δ — Firm 0")
+    ax.legend(fontsize=8)
+
+    # --- (0,1): Δ evolution per H (Firm 1) ---
+    ax = axes[0, 1]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_1_delta")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
+    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
+    ax.set_ylabel("Δ (Firm 1)")
+    ax.set_title("Collusion Index Δ — Firm 1")
+    ax.legend(fontsize=8)
+
+    # --- (0,2): Avg LMP evolution per H ---
+    ax = axes[0, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "avg_lmp")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    bench = runs[0][0].get("benchmarks", {})
+    if bench:
+        ax.axhline(bench["competitive"]["avg_lmp"], ls="--", color="green", alpha=0.5,
+                    linewidth=0.8, label="Competitive LMP")
+        ax.axhline(bench["monopoly"]["avg_lmp"], ls=":", color="red", alpha=0.5,
+                    linewidth=0.8, label="Monopoly LMP")
+    ax.set_ylabel("Avg LMP ($/MWh)")
+    ax.set_title("Average LMP")
+    ax.legend(fontsize=8)
+
+    # --- (1,0): KL divergence per H (max of both firms) ---
+    ax = axes[1, 0]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "max_kl")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    kl_thresh = runs[0][0].get("kl_threshold", 0.01)
+    ax.axhline(kl_thresh, ls="--", color="red", alpha=0.5, linewidth=0.8,
+               label=f"Threshold ({kl_thresh})")
+    ax.set_ylabel("Max KL divergence")
+    ax.set_yscale("log")
+    ax.set_title("Policy KL Convergence")
+    ax.legend(fontsize=8)
+
+    # --- (1,1): Generation per H (Firm 0) ---
+    ax = axes[1, 1]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_0_avg_gen")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.set_ylabel("Avg Generation (MW)")
+    ax.set_title("Generation — Firm 0")
+    ax.legend(fontsize=8)
+
+    # --- (1,2): Generation per H (Firm 1) ---
+    ax = axes[1, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_1_avg_gen")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.set_ylabel("Avg Generation (MW)")
+    ax.set_title("Generation — Firm 1")
+    ax.legend(fontsize=8)
+
+    for row in axes:
+        for a in row:
+            a.set_xlabel("Timesteps")
+
+    fig.tight_layout()
+
+    if save_dir:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        fname = save_path / f"comparison_h{'_'.join(h_labels)}.png"
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
+        print(f"Saved → {fname}")
+    else:
+        plt.show()
+
+
 # ====================== Main ======================
 def main():
     parser = argparse.ArgumentParser(description="Calvano-style plots for PPO collusion")
-    parser.add_argument("run_dirs", nargs="+", type=Path)
+    parser.add_argument("run_dirs", nargs="*", type=Path,
+                        help="One or more run directories to plot")
+    parser.add_argument("--compare", action="store_true",
+                        help="Generate a cross-history comparison figure")
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
     args = parser.parse_args()
+
+    if not args.run_dirs:
+        parser.error("Provide at least one run directory.")
+
+    if args.compare:
+        plot_comparison(args.run_dirs, save_dir=args.save)
+        return
 
     for rd in args.run_dirs:
         config, sessions = load_sessions(rd)
         h = config.get("history_len", "?")
         n = len(sessions)
 
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         fig.suptitle(f"PPO Collusion — H={h}  ({n} session{'s' if n>1 else ''})", fontsize=14)
 
         plot_generation(axes[0, 0], config, sessions)
         plot_delta(axes[0, 1], config, sessions)
+        plot_kl(axes[0, 2], config, sessions)
         plot_limit_strategy(axes[1, 0], config, sessions)
 
-        # Impulse response gets 2 sub-subplots
-        axes[1, 1].remove()
-        gs = axes[1, 1].get_gridspec()
-        sub_axes = [fig.add_subplot(gs[1, 1])]
-        # For simplicity, only plot deviation by firm 0 in the main grid
-        plot_impulse_response(sub_axes + [sub_axes[0]], config, sessions)
+        plot_impulse_response([axes[1, 1], axes[1, 2]], config, sessions)
 
         fig.tight_layout()
 

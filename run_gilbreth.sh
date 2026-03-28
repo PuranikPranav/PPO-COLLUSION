@@ -11,8 +11,8 @@
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 
-# History length H is the first argument: sbatch run_gilbreth.sh 1
-H=${1:?"Usage: sbatch run_gilbreth.sh <H>  (e.g. sbatch run_gilbreth.sh 1)"}
+# History lengths to run (override with first arg, e.g. sbatch run_gilbreth.sh "1 2 3")
+H_LIST="${1:-1 2 3}"
 
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 export PYTHONUNBUFFERED=1
@@ -46,29 +46,44 @@ fi
 # ── Experiment parameters ────────────────────────────────────────────
 SESSIONS=50               # Calvano uses 1000; 50 is practical for PPO
 TIMESTEPS=5000000          # Max steps per session — agents need ~3-5M to plateau
-PATIENCE=50                # Converge if Δ stable for 50 consecutive PPO updates
-CONV_THRESH=0.02           # Δ must change < 0.02 between updates to count as stable
+PATIENCE=100               # Converge if KL < threshold for 100 consecutive PPO updates
+KL_THRESH=0.01             # KL divergence threshold for convergence
 EPISODE_LEN=168            # 1 week of hourly intervals
 
-# ── Run experiment ───────────────────────────────────────────────────
-echo "=========================================="
-echo "  history_len = $H  |  $SESSIONS sessions"
-echo "=========================================="
-python experiments/ppo.py \
-    --history-len "$H" \
-    --num-sessions "$SESSIONS" \
-    --total-timesteps "$TIMESTEPS" \
-    --convergence-patience "$PATIENCE" \
-    --convergence-threshold "$CONV_THRESH" \
-    --episode-len "$EPISODE_LEN" \
-    --rollout-len 2048 \
-    --hidden-dim 64 \
-    --lr 3e-4 \
-    --seed 42 \
-    --cuda \
-    --output-dir "results/h${H}"
+# ── Run experiments for each history length ──────────────────────────
+for H in $H_LIST; do
+    echo "=========================================="
+    echo "  history_len = $H  |  $SESSIONS sessions"
+    echo "=========================================="
+    python experiments/ppo.py \
+        --history-len "$H" \
+        --num-sessions "$SESSIONS" \
+        --total-timesteps "$TIMESTEPS" \
+        --convergence-patience "$PATIENCE" \
+        --kl-threshold "$KL_THRESH" \
+        --episode-len "$EPISODE_LEN" \
+        --rollout-len 2048 \
+        --hidden-dim 64 \
+        --lr 3e-4 \
+        --seed 42 \
+        --cuda \
+        --output-dir "results/h${H}"
 
-# ── Generate figure for this H ───────────────────────────────────────
-python experiments/plot_results.py "results/h${H}" --save "figures/"
+    # Per-H figure
+    python experiments/plot_results.py "results/h${H}" --save "figures/"
+    echo "Finished H=$H. Results in results/h${H}"
+done
 
-echo "Run complete. Results in results/h${H}, figures in figures/"
+# ── Cross-history comparison figure ──────────────────────────────────
+RUN_DIRS=""
+for H in $H_LIST; do
+    if [ -d "results/h${H}" ]; then
+        RUN_DIRS="$RUN_DIRS results/h${H}"
+    fi
+done
+if [ -n "$RUN_DIRS" ]; then
+    python experiments/plot_results.py --compare $RUN_DIRS --save "figures/"
+    echo "Comparison figure saved to figures/"
+fi
+
+echo "All runs complete."
