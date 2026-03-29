@@ -56,9 +56,9 @@ fi
 # ── Experiment parameters (Calvano-scale paper settings) ─────────────
 SESSIONS=100               # Independent seeds per history length (raise for paper-scale 1000)
 TIMESTEPS=2000000          # Max env steps per session (Calvano-style x-axis cap at 2M)
-# Stopping: convergence-mode delta (normalized profit stable) or kl (policy KL small)
-CONVERGENCE_MODE=delta     # switch to kl for KL-based early stop
-PATIENCE=100              # consecutive PPO updates satisfying the criterion (delta or kl)
+# Stopping: delta (Δ stable) or kl (max firm KL below threshold for PATIENCE updates)
+CONVERGENCE_MODE=kl       # use delta for normalized-profit stability stopping
+PATIENCE=100              # consecutive PPO updates with max KL < KL_THRESH (if lag>0: lagged KL)
 DELTA_CONV_THRESH=0.01     # delta mode: max_f |Δ_f − Δ_f_prev| must stay below this
 KL_THRESH=0.01             # kl mode: max_f KL must stay below this; still logged in delta mode
 POLICY_KL_LAG=0            # if k>0: log KL(π_{t−k}‖π_t); kl-mode convergence uses lagged KL when k>0
