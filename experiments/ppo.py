@@ -3,7 +3,7 @@ Multi-Agent Independent PPO for studying tacit collusion in electricity markets.
 
 Methodology adapted from Calvano, Calzolari, Denicolò & Pastorello (2021):
   - Normalized collusion metric Δ = (π − πC) / (πM − πC)
-  - Early stopping: --convergence-mode delta (Δ stable across updates) or kl (policy KL)
+  - Early stopping: --convergence-mode delta, kl (policy KL), or none
   - Multiple independent sessions with different seeds, averaged
   - Post-training analysis: limit strategy + impulse response to deviation
 
@@ -22,6 +22,14 @@ Usage
 
     # Lag-k policy KL: KL(π_{t−k}‖π_t) on rollout obs (logged; kl-mode stop uses it when k>0)
     python experiments/ppo.py --history-len 1 --policy-kl-lag 10 --convergence-patience 0
+
+    # No early stop (run full --total-timesteps) even if patience > 0
+    python experiments/ppo.py --convergence-mode none --convergence-patience 100
+
+Paper baseline (Calzolari et al., imperfect monitoring): Q-learning Cournot duopoly, discrete
+actions, δ=0.95, α=0.15, β=4e-6, 1000 sessions, convergence = greedy policy unchanged for
+100_000 *periods* (their time step). This repo uses independent PPO on a DC-OPF market;
+``convergence`` is measured in *PPO update* units (--convergence-patience), not env steps.
 """
 
 import argparse
@@ -556,6 +564,109 @@ def run_deviation_experiment(env, agents, obs_normalizers,
     return results
 
 
+def _print_paper_vs_ppo_banner():
+    print(
+        "\n=== Paper vs this simulation (do not expect 1:1 parameter match) ===\n"
+        "  Paper: Q-learning, Cournot, discrete outputs, two demand states, γ=0.95, "
+        "100k consecutive periods with unchanged greedy policy.\n"
+        "  Here:  Independent PPO, continuous generation, DC-OPF/LMP, γ from --gamma, "
+        "early stop = N consecutive PPO updates (--convergence-patience) under "
+        "--convergence-mode delta|kl (or none).\n"
+        "  Δ metric: (π−πC)/(πM−πC) per firm — same normalization idea as the paper.\n"
+        + "=" * 66
+    )
+
+
+def _print_session_convergence_banner(args, session_id: int):
+    use = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    print(
+        "\n--- Convergence / logging ---\n"
+        f"  convergence_mode={args.convergence_mode}\n"
+        f"  early_stop_active={'yes' if use else 'no'} "
+        f"(patience={args.convergence_patience} PPO updates; ignored when mode=none)\n"
+        f"  delta_convergence_threshold={args.delta_convergence_threshold}\n"
+        f"  kl_threshold={args.kl_threshold}  policy_kl_lag={args.policy_kl_lag}\n"
+        "  streak counts consecutive PPO updates satisfying the *active* mode only "
+        "(delta: max_f|Δ_f−Δ_prev|; kl: max_f KL per --policy-kl-lag). "
+        "Printed KL is for monitoring in all modes.\n"
+        "---\n"
+    )
+
+
+def _print_progress_line(
+    args,
+    session_id: int,
+    num_sessions: int,
+    total_steps: int,
+    episode_count: int,
+    update_idx: int,
+    num_updates: int,
+    row: dict,
+    stable_count: int,
+    delta_max_jump: float,
+    kl_for_convergence: float,
+):
+    d0 = row.get("firm_0_delta", 0)
+    d1 = row.get("firm_1_delta", 0)
+    mk = row.get("max_kl", 0)
+    mkl = row.get("max_kl_lag")
+    sess_prefix = (
+        f"S{session_id + 1}/{num_sessions} "
+        if num_sessions > 1
+        else ""
+    )
+    kl_extra = ""
+    if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
+        kl_extra = f" KL_lag{args.policy_kl_lag}={mkl:.2e}"
+
+    use_conv = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    if args.log_format == "legacy":
+        print(
+            f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
+            f"LMP ${row['avg_lmp']:.2f} | "
+            f"Δ0={d0:.3f} Δ1={d1:.3f} | "
+            f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
+            f"KL={mk:.2e}{kl_extra} streak={stable_count}"
+            + (f"  [streak=active:{args.convergence_mode}]" if use_conv else "")
+        )
+        return
+
+    if use_conv:
+        sm = args.convergence_mode
+    elif args.convergence_mode == "none":
+        sm = "none"
+    else:
+        sm = "inactive"  # delta/kl but patience=0
+    dj = delta_max_jump if math.isfinite(delta_max_jump) else float("nan")
+    kc = kl_for_convergence if math.isfinite(kl_for_convergence) else float("nan")
+    parts = [
+        f"{sess_prefix}PPO",
+        f"conv={args.convergence_mode}",
+        f"early_stop={'on' if use_conv else 'off'}",
+        f"d_thr={args.delta_convergence_threshold}",
+        f"kl_thr={args.kl_threshold}",
+        f"step={total_steps}",
+        f"upd={update_idx + 1}/{num_updates}",
+        f"ep={episode_count}",
+        f"LMP={row['avg_lmp']:.2f}",
+        f"d0={d0:.3f}",
+        f"d1={d1:.3f}",
+        f"g0={row['firm_0_avg_gen']:.1f}",
+        f"g1={row['firm_1_avg_gen']:.1f}",
+        f"KL_intra_max={mk:.2e}",
+    ]
+    if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
+        parts.append(f"KL_lag_k={mkl:.2e}")
+    parts.append(f"d_jump={dj:.4g}" if math.isfinite(dj) else "d_jump=NA")
+    parts.append(f"kl_for_conv={kc:.4g}" if math.isfinite(kc) else "kl_for_conv=NA")
+    parts.append(f"streak_metric={sm}")
+    if use_conv:
+        parts.append(f"streak={stable_count}/{args.convergence_patience}")
+    else:
+        parts.append("streak=n/a")
+    print(" ".join(parts))
+
+
 # ======================================================================
 # Single-session training
 # ======================================================================
@@ -579,11 +690,16 @@ def train_session(env, benchmarks, args, session_id, device):
         )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
-    # Early stopping: Δ-stability (default) or policy KL (--convergence-mode)
-    use_convergence = args.convergence_patience > 0
+    # Early stopping: Δ-stability, policy KL, or none (--convergence-mode)
+    use_convergence = args.convergence_patience > 0 and args.convergence_mode in (
+        "delta",
+        "kl",
+    )
     conv_delta = args.convergence_mode == "delta"
     conv_kl = args.convergence_mode == "kl"
     stable_count = 0
+    last_delta_max_jump = float("nan")
+    last_kl_for_convergence = float("nan")
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
     last_agent_kls_lag = {fid: float("nan") for fid in range(NUM_FIRMS)}
     policy_ckpt_hist = {fid: [] for fid in agents}
@@ -603,6 +719,8 @@ def train_session(env, benchmarks, args, session_id, device):
 
     num_updates = args.total_timesteps // args.rollout_len
     wall_start = time.time()
+
+    _print_session_convergence_banner(args, session_id)
 
     for update in range(num_updates):
         # ---------- collect rollout ----------
@@ -719,6 +837,7 @@ def train_session(env, benchmarks, args, session_id, device):
                 max_kl = max(last_agent_kls.values())
 
             if max_kl is not None:
+                last_kl_for_convergence = float(max_kl)
                 if max_kl < args.kl_threshold:
                     stable_count += 1
                 else:
@@ -726,26 +845,36 @@ def train_session(env, benchmarks, args, session_id, device):
 
                 if stable_count >= args.convergence_patience:
                     converged = True
+            else:
+                last_kl_for_convergence = float("nan")
+        else:
+            last_kl_for_convergence = float("nan")
+
+        # Realized Δ and jump (logged every mode; streak only in delta mode)
+        deltas_now = {}
+        for fid in range(NUM_FIRMS):
+            ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
+            avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0.0
+            deltas_now[fid] = compute_delta(avg_step_prof, pi_c[fid], pi_m[fid])
+
+        if all(prev_firm_deltas[f] is not None for f in range(NUM_FIRMS)):
+            last_delta_max_jump = max(
+                abs(deltas_now[f] - prev_firm_deltas[f]) for f in range(NUM_FIRMS)
+            )
+        else:
+            last_delta_max_jump = float("nan")
 
         if use_convergence and conv_delta:
-            deltas_now = {}
-            for fid in range(NUM_FIRMS):
-                ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
-                avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0.0
-                deltas_now[fid] = compute_delta(avg_step_prof, pi_c[fid], pi_m[fid])
-
             if all(prev_firm_deltas[f] is not None for f in range(NUM_FIRMS)):
-                max_jump = max(
-                    abs(deltas_now[f] - prev_firm_deltas[f]) for f in range(NUM_FIRMS)
-                )
-                if max_jump < args.delta_convergence_threshold:
+                if last_delta_max_jump < args.delta_convergence_threshold:
                     stable_count += 1
                 else:
                     stable_count = 0
                 if stable_count >= args.convergence_patience:
                     converged = True
-            for f in range(NUM_FIRMS):
-                prev_firm_deltas[f] = deltas_now[f]
+
+        for f in range(NUM_FIRMS):
+            prev_firm_deltas[f] = deltas_now[f]
 
         # ---------- logging ----------
         if (update + 1) % args.log_interval == 0:
@@ -783,26 +912,26 @@ def train_session(env, benchmarks, args, session_id, device):
                 row["max_kl_lag"] = max(fin_lag) if fin_lag else float("nan")
             row["kl_streak"] = stable_count
             row["convergence_streak"] = stable_count
+            row["delta_max_jump"] = float(last_delta_max_jump)
+            row["kl_for_convergence"] = float(last_kl_for_convergence)
+            row["ppo_update"] = update + 1
+            row["ppo_updates_total"] = num_updates
+            row["convergence_mode"] = args.convergence_mode
+            row["early_stop_active"] = use_convergence
             log_rows.append(row)
 
-            d0 = row.get("firm_0_delta", 0)
-            d1 = row.get("firm_1_delta", 0)
-            mk = row.get("max_kl", 0)
-            mkl = row.get("max_kl_lag")
-            sess_prefix = (
-                f"S{session_id + 1}/{args.num_sessions} "
-                if args.num_sessions > 1
-                else ""
-            )
-            kl_extra = ""
-            if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
-                kl_extra = f" KL_lag{args.policy_kl_lag}={mkl:.2e}"
-            print(
-                f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
-                f"LMP ${row['avg_lmp']:.2f} | "
-                f"Δ0={d0:.3f} Δ1={d1:.3f} | "
-                f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
-                f"KL={mk:.2e}{kl_extra} streak={stable_count}"
+            _print_progress_line(
+                args,
+                session_id,
+                args.num_sessions,
+                total_steps,
+                episode_count,
+                update,
+                num_updates,
+                row,
+                stable_count,
+                last_delta_max_jump,
+                last_kl_for_convergence,
             )
 
         if converged:
@@ -863,6 +992,7 @@ def train_session(env, benchmarks, args, session_id, device):
 def main(args):
     device = "cuda" if torch.cuda.is_available() and args.cuda else "cpu"
     print(f"Device: {device}")
+    _print_paper_vs_ppo_banner()
 
     env = ElectricityMarketEnv(
         history_len=args.history_len,
@@ -989,15 +1119,17 @@ def parse_args():
         "--convergence-mode",
         type=str,
         default="delta",
-        choices=("delta", "kl"),
-        help="delta: stop when realized Δ is stable (see --delta-convergence-threshold). "
-        "kl: stop when policy KL stays below --kl-threshold.",
+        choices=("delta", "kl", "none"),
+        help="delta: stop when max_f|Δ_f−Δ_prev| < --delta-convergence-threshold for "
+        "--convergence-patience updates. kl: same with policy KL vs --kl-threshold. "
+        "none: never early-stop on convergence (run full --total-timesteps; patience ignored).",
     )
     p.add_argument(
         "--convergence-patience",
         type=int,
         default=0,
-        help="Consecutive PPO updates satisfying the active criterion (0 = run to --total-timesteps only)",
+        help="Consecutive PPO updates satisfying the active criterion (0 = no early stop). "
+        "Ignored when --convergence-mode none.",
     )
     p.add_argument(
         "--delta-convergence-threshold",
@@ -1025,6 +1157,14 @@ def parse_args():
     p.add_argument("--output-dir", type=str, default="results/default")
     p.add_argument("--log-interval", type=int, default=5)
     p.add_argument("--save-interval", type=int, default=50)
+    p.add_argument(
+        "--log-format",
+        type=str,
+        default="structured",
+        choices=("structured", "legacy"),
+        help="structured: key=value line (conv mode, d_jump, kl_for_conv, streak). "
+        "legacy: older bracketed one-line format.",
+    )
 
     return p.parse_args()
 
