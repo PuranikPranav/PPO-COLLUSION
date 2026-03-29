@@ -61,6 +61,7 @@ CONVERGENCE_MODE=delta     # switch to kl for KL-based early stop
 PATIENCE=100              # consecutive PPO updates satisfying the criterion (delta or kl)
 DELTA_CONV_THRESH=0.01     # delta mode: max_f |Δ_f − Δ_f_prev| must stay below this
 KL_THRESH=0.01             # kl mode: max_f KL must stay below this; still logged in delta mode
+POLICY_KL_LAG=0            # if k>0: log KL(π_{t−k}‖π_t); kl-mode convergence uses lagged KL when k>0
 EPISODE_LEN=168            # 1 week of hourly intervals
 
 # ── Run experiments for each history length ──────────────────────────
@@ -76,6 +77,7 @@ for H in $H_LIST; do
         --convergence-patience "$PATIENCE" \
         --delta-convergence-threshold "$DELTA_CONV_THRESH" \
         --kl-threshold "$KL_THRESH" \
+        --policy-kl-lag "$POLICY_KL_LAG" \
         --episode-len "$EPISODE_LEN" \
         --rollout-len 2048 \
         --hidden-dim 64 \

@@ -487,25 +487,51 @@ def _positive_series_for_log(y, lo=1e-12):
 
 
 def plot_kl(ax, config, sessions, label_suffix=""):
+    lag_k = int(config.get("policy_kl_lag", 0) or 0)
+    use_lag = lag_k > 0 and _metrics_has_key(sessions, "firm_0_kl_lag")
+
     for fid in range(2):
         steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_kl")
         if not steps:
             continue
         color = f"C{fid}"
         m = _positive_series_for_log(mean)
-        ax.plot(steps, m, color=color, label=f"Firm {fid}{label_suffix}")
+        ax.plot(steps, m, color=color, label=f"F{fid} intra-update{label_suffix}")
         if len(sessions) > 1:
             s_lo = _positive_series_for_log(mean - std)
             s_hi = _positive_series_for_log(mean + std)
             ax.fill_between(steps, s_lo, s_hi, alpha=0.15, color=color)
+
+        if use_lag:
+            steps_l, mean_l, std_l = aggregate_metric(
+                sessions, f"firm_{fid}_kl_lag", default_for_missing=float("nan")
+            )
+            if steps_l:
+                ml = _positive_series_for_log(mean_l)
+                ax.plot(
+                    steps_l,
+                    ml,
+                    color=color,
+                    ls="--",
+                    label=f"F{fid} π_{{t−{lag_k}}}‖π_t{label_suffix}",
+                )
+                if len(sessions) > 1:
+                    ax.fill_between(
+                        steps_l,
+                        _positive_series_for_log(mean_l - std_l),
+                        _positive_series_for_log(mean_l + std_l),
+                        alpha=0.08,
+                        color=color,
+                    )
 
     kl_thresh = config.get("kl_threshold", 0.01)
     ax.axhline(kl_thresh, ls="--", color="red", alpha=0.5, linewidth=0.8,
                label=f"KL threshold ({kl_thresh})")
     ax.set_ylabel("KL divergence")
     ax.set_yscale("log")
-    ax.set_title("Policy KL Divergence (old → new)")
-    ax.legend(fontsize=8)
+    title = "Policy KL (solid: intra-update; dashed: lagged)" if use_lag else "Policy KL (intra-update)"
+    ax.set_title(title)
+    ax.legend(fontsize=7)
 
 
 # ====================== Comparison across history lengths ======================

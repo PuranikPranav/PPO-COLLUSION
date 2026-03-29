@@ -19,10 +19,14 @@ Usage
     # KL mode (optional): max KL < --kl-threshold for N consecutive PPO updates
     python experiments/ppo.py --history-len 1 --convergence-mode kl \
         --convergence-patience 100 --kl-threshold 0.01 --total-timesteps 2000000
+
+    # Lag-k policy KL: KL(π_{t−k}‖π_t) on rollout obs (logged; kl-mode stop uses it when k>0)
+    python experiments/ppo.py --history-len 1 --policy-kl-lag 10 --convergence-patience 0
 """
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -411,6 +415,33 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_c, pi_m):
     return {"greedy_totals": greedy_totals, "greedy_delta": greedy_delta}
 
 
+def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict_cpu: dict) -> float:
+    """
+    KL( π_checkpoint || π_current ) on obs_buf: checkpoint is old_state_dict (CPU tensors),
+    current is agent's live weights. Restores agent after.
+    """
+    device = agent.device
+    current_sd = {k: v.clone() for k, v in agent.ac.state_dict().items()}
+    old_sd_dev = {
+        k: (v.to(device, dtype=torch.float32) if torch.is_tensor(v) else v)
+        for k, v in old_state_dict_cpu.items()
+    }
+    try:
+        agent.ac.load_state_dict(old_sd_dev)
+        with torch.no_grad():
+            old_dist = agent.ac.policy(obs_buf)
+            old_mean = old_dist.loc.clone()
+            old_std = old_dist.scale.clone()
+    finally:
+        agent.ac.load_state_dict(current_sd)
+
+    with torch.no_grad():
+        new_dist = agent.ac.policy(obs_buf)
+    old_fixed = Normal(old_mean, old_std)
+    kl = torch.distributions.kl_divergence(old_fixed, new_dist)
+    return float(kl.sum(dim=-1).mean().item())
+
+
 # ======================================================================
 # Post-training analysis
 # ======================================================================
@@ -554,6 +585,8 @@ def train_session(env, benchmarks, args, session_id, device):
     conv_kl = args.convergence_mode == "kl"
     stable_count = 0
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
+    last_agent_kls_lag = {fid: float("nan") for fid in range(NUM_FIRMS)}
+    policy_ckpt_hist = {fid: [] for fid in agents}
     prev_firm_deltas = {fid: None for fid in range(NUM_FIRMS)}
 
     # Logging
@@ -649,15 +682,50 @@ def train_session(env, benchmarks, args, session_id, device):
                 kl = torch.distributions.kl_divergence(old_dist, new_dist)
                 last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
-        if use_convergence and conv_kl:
-            max_kl = max(last_agent_kls.values())
-            if max_kl < args.kl_threshold:
-                stable_count += 1
-            else:
-                stable_count = 0
+        # Lag-k KL: π at end of update (t−k) vs π now (t) on this rollout's observations
+        if args.policy_kl_lag > 0:
+            for fid, agent in agents.items():
+                obs_buf = old_policy_snapshots[fid]["obs"]
+                hist = policy_ckpt_hist[fid]
+                sd_cpu = {
+                    k: v.detach().cpu().clone()
+                    for k, v in agent.ac.state_dict().items()
+                }
+                hist.append(sd_cpu)
+                if len(hist) > args.policy_kl_lag + 1:
+                    hist.pop(0)
+                if len(hist) > args.policy_kl_lag:
+                    last_agent_kls_lag[fid] = kl_checkpoint_vs_current_policy(
+                        agent, obs_buf, hist[0]
+                    )
+                else:
+                    last_agent_kls_lag[fid] = float("nan")
+        else:
+            for fid in agents:
+                last_agent_kls_lag[fid] = float("nan")
 
-            if stable_count >= args.convergence_patience:
-                converged = True
+        if use_convergence and conv_kl:
+            if args.policy_kl_lag > 0:
+                lag_vals = [
+                    last_agent_kls_lag[f]
+                    for f in agents
+                    if math.isfinite(last_agent_kls_lag[f])
+                ]
+                if len(lag_vals) == len(agents):
+                    max_kl = max(lag_vals)
+                else:
+                    max_kl = None
+            else:
+                max_kl = max(last_agent_kls.values())
+
+            if max_kl is not None:
+                if max_kl < args.kl_threshold:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+
+                if stable_count >= args.convergence_patience:
+                    converged = True
 
         if use_convergence and conv_delta:
             deltas_now = {}
@@ -700,10 +768,19 @@ def train_session(env, benchmarks, args, session_id, device):
                 row[f"firm_{fid}_avg_gen"] = avg_gen
                 row[f"firm_{fid}_delta"] = float(delta)
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
+                if args.policy_kl_lag > 0:
+                    row[f"firm_{fid}_kl_lag"] = last_agent_kls_lag.get(fid, float("nan"))
                 if gr is not None:
                     row[f"firm_{fid}_greedy_gen"] = gr["greedy_totals"][fid]
                     row[f"firm_{fid}_greedy_delta"] = gr["greedy_delta"][fid]
             row["max_kl"] = max(last_agent_kls.values())
+            if args.policy_kl_lag > 0:
+                fin_lag = [
+                    last_agent_kls_lag[f]
+                    for f in agents
+                    if math.isfinite(last_agent_kls_lag.get(f, float("nan")))
+                ]
+                row["max_kl_lag"] = max(fin_lag) if fin_lag else float("nan")
             row["kl_streak"] = stable_count
             row["convergence_streak"] = stable_count
             log_rows.append(row)
@@ -711,17 +788,21 @@ def train_session(env, benchmarks, args, session_id, device):
             d0 = row.get("firm_0_delta", 0)
             d1 = row.get("firm_1_delta", 0)
             mk = row.get("max_kl", 0)
+            mkl = row.get("max_kl_lag")
             sess_prefix = (
                 f"S{session_id + 1}/{args.num_sessions} "
                 if args.num_sessions > 1
                 else ""
             )
+            kl_extra = ""
+            if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
+                kl_extra = f" KL_lag{args.policy_kl_lag}={mkl:.2e}"
             print(
                 f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
                 f"LMP ${row['avg_lmp']:.2f} | "
                 f"Δ0={d0:.3f} Δ1={d1:.3f} | "
                 f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
-                f"KL={mk:.2e} streak={stable_count}"
+                f"KL={mk:.2e}{kl_extra} streak={stable_count}"
             )
 
         if converged:
@@ -731,9 +812,16 @@ def train_session(env, benchmarks, args, session_id, device):
                 else ""
             )
             if conv_kl:
-                msg = (
-                    f"KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates"
-                )
+                if args.policy_kl_lag > 0:
+                    msg = (
+                        f"max KL(π_t−{args.policy_kl_lag}‖π_t) < {args.kl_threshold} "
+                        f"for {args.convergence_patience} consecutive updates"
+                    )
+                else:
+                    msg = (
+                        f"KL(intra-update) < {args.kl_threshold} "
+                        f"for {args.convergence_patience} consecutive updates"
+                    )
             else:
                 msg = (
                     f"max |Δ−Δ_prev| < {args.delta_convergence_threshold} "
@@ -921,7 +1009,14 @@ def parse_args():
         "--kl-threshold",
         type=float,
         default=0.01,
-        help="kl mode: convergence requires max_f KL_f < this for patience updates; also logged / plots",
+        help="kl mode: max_f KL vs this for patience (intra-update KL if policy-kl-lag=0, else lagged KL)",
+    )
+    p.add_argument(
+        "--policy-kl-lag",
+        type=int,
+        default=0,
+        help="If k>0, log KL(π_{t−k}‖π_t) on rollout obs; kl convergence uses this when mode=kl. "
+        "k=0 keeps only pre→post update KL within the same iteration.",
     )
 
     # System
