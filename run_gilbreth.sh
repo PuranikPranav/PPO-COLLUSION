@@ -2,9 +2,14 @@
 # Run from the repository root (so experiments/ and results/ resolve correctly):
 #   cd /path/to/ppo-collusion && sbatch run_gilbreth.sh
 # Optional: sbatch run_gilbreth.sh "1 2"   — default is H = 1 2 3
+#
+# GPU partition (default a30 — often shorter queue than a100-40gb). Override without editing:
+#   sbatch --partition=a100-40gb run_gilbreth.sh
+# Other Gilbreth partitions (if your account allows): a30, a100-40gb, gilbreth-nodes, …
+#   module spider cuda   # match CUDA module to GPU generation if needed
 #SBATCH --job-name=ppo-collusion
 #SBATCH --account=liu334
-#SBATCH --partition=a100-40gb
+#SBATCH --partition=a30
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
