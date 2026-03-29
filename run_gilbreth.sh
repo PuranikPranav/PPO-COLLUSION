@@ -54,7 +54,7 @@ else
 fi
 
 # ── Experiment parameters (Calvano-scale paper settings) ─────────────
-SESSIONS=1000              # Average metrics over 1000 independent seeds (very long run)
+SESSIONS=100               # Independent seeds per history length (raise for paper-scale 1000)
 TIMESTEPS=2000000          # Max env steps per session (Calvano-style x-axis cap at 2M)
 # Stopping: convergence-mode delta (normalized profit stable) or kl (policy KL small)
 CONVERGENCE_MODE=delta     # switch to kl for KL-based early stop
