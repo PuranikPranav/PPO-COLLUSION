@@ -2,8 +2,8 @@
 Multi-Agent Independent PPO for studying tacit collusion in electricity markets.
 
 Methodology adapted from Calvano, Calzolari, Denicolò & Pastorello (2021):
-  - Normalized collusion metric Δ = (π − πC) / (πM − πC) (logged / analyzed, not the stop rule)
-  - Convergence criterion: policy KL below --kl-threshold for N consecutive PPO updates
+  - Normalized collusion metric Δ = (π − πC) / (πM − πC)
+  - Early stopping: --convergence-mode delta (Δ stable across updates) or kl (policy KL)
   - Multiple independent sessions with different seeds, averaged
   - Post-training analysis: limit strategy + impulse response to deviation
 
@@ -12,10 +12,13 @@ Usage
     # Quick single run
     python experiments/ppo.py --history-len 1 --total-timesteps 500000
 
-    # Gilbreth-scale (1000 sessions, 2M steps cap, strict KL patience — very long wall time)
-    python experiments/ppo.py --history-len 1 --num-sessions 1000 \
-        --convergence-patience 100000 --kl-threshold 0.01 --total-timesteps 2000000 \
-        --output-dir results/h1
+    # Δ-stability (default mode): max |Δ_i - Δ_i_prev| < threshold for N consecutive updates
+    python experiments/ppo.py --history-len 1 --convergence-mode delta \
+        --convergence-patience 100 --delta-convergence-threshold 0.01 --total-timesteps 2000000
+
+    # KL mode (optional): max KL < --kl-threshold for N consecutive PPO updates
+    python experiments/ppo.py --history-len 1 --convergence-mode kl \
+        --convergence-patience 100 --kl-threshold 0.01 --total-timesteps 2000000
 """
 
 import argparse
@@ -545,10 +548,13 @@ def train_session(env, benchmarks, args, session_id, device):
         )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
-    # Convergence tracking — KL divergence between consecutive policies
+    # Early stopping: Δ-stability (default) or policy KL (--convergence-mode)
     use_convergence = args.convergence_patience > 0
+    conv_delta = args.convergence_mode == "delta"
+    conv_kl = args.convergence_mode == "kl"
     stable_count = 0
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
+    prev_firm_deltas = {fid: None for fid in range(NUM_FIRMS)}
 
     # Logging
     log_rows = []
@@ -643,7 +649,7 @@ def train_session(env, benchmarks, args, session_id, device):
                 kl = torch.distributions.kl_divergence(old_dist, new_dist)
                 last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
-        if use_convergence:
+        if use_convergence and conv_kl:
             max_kl = max(last_agent_kls.values())
             if max_kl < args.kl_threshold:
                 stable_count += 1
@@ -652,6 +658,26 @@ def train_session(env, benchmarks, args, session_id, device):
 
             if stable_count >= args.convergence_patience:
                 converged = True
+
+        if use_convergence and conv_delta:
+            deltas_now = {}
+            for fid in range(NUM_FIRMS):
+                ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
+                avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0.0
+                deltas_now[fid] = compute_delta(avg_step_prof, pi_c[fid], pi_m[fid])
+
+            if all(prev_firm_deltas[f] is not None for f in range(NUM_FIRMS)):
+                max_jump = max(
+                    abs(deltas_now[f] - prev_firm_deltas[f]) for f in range(NUM_FIRMS)
+                )
+                if max_jump < args.delta_convergence_threshold:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+                if stable_count >= args.convergence_patience:
+                    converged = True
+            for f in range(NUM_FIRMS):
+                prev_firm_deltas[f] = deltas_now[f]
 
         # ---------- logging ----------
         if (update + 1) % args.log_interval == 0:
@@ -679,6 +705,7 @@ def train_session(env, benchmarks, args, session_id, device):
                     row[f"firm_{fid}_greedy_delta"] = gr["greedy_delta"][fid]
             row["max_kl"] = max(last_agent_kls.values())
             row["kl_streak"] = stable_count
+            row["convergence_streak"] = stable_count
             log_rows.append(row)
 
             d0 = row.get("firm_0_delta", 0)
@@ -703,10 +730,16 @@ def train_session(env, benchmarks, args, session_id, device):
                 if args.num_sessions > 1
                 else ""
             )
-            print(
-                f"  {sess_prefix}✓ Converged at step {total_steps} "
-                f"(KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates)"
-            )
+            if conv_kl:
+                msg = (
+                    f"KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates"
+                )
+            else:
+                msg = (
+                    f"max |Δ−Δ_prev| < {args.delta_convergence_threshold} "
+                    f"for {args.convergence_patience} consecutive updates"
+                )
+            print(f"  {sess_prefix}✓ Converged at step {total_steps} ({msg})")
             break
 
     # ---------- post-training analysis ----------
@@ -864,10 +897,32 @@ def parse_args():
     # Calvano methodology
     p.add_argument("--num-sessions", type=int, default=1,
                    help="Independent training sessions (paper uses 1000)")
-    p.add_argument("--convergence-patience", type=int, default=0,
-                   help="Stop when policy KL < threshold for N consecutive PPO updates (0=disabled)")
-    p.add_argument("--kl-threshold", type=float, default=0.01,
-                   help="KL divergence threshold for policy convergence")
+    p.add_argument(
+        "--convergence-mode",
+        type=str,
+        default="delta",
+        choices=("delta", "kl"),
+        help="delta: stop when realized Δ is stable (see --delta-convergence-threshold). "
+        "kl: stop when policy KL stays below --kl-threshold.",
+    )
+    p.add_argument(
+        "--convergence-patience",
+        type=int,
+        default=0,
+        help="Consecutive PPO updates satisfying the active criterion (0 = run to --total-timesteps only)",
+    )
+    p.add_argument(
+        "--delta-convergence-threshold",
+        type=float,
+        default=0.01,
+        help="delta mode: convergence requires max_f |Δ_f−Δ_f_prev| < this for patience updates",
+    )
+    p.add_argument(
+        "--kl-threshold",
+        type=float,
+        default=0.01,
+        help="kl mode: convergence requires max_f KL_f < this for patience updates; also logged / plots",
+    )
 
     # System
     p.add_argument("--cuda", action="store_true")

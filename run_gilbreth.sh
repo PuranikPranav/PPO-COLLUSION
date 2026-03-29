@@ -56,8 +56,11 @@ fi
 # ── Experiment parameters (Calvano-scale paper settings) ─────────────
 SESSIONS=1000              # Average metrics over 1000 independent seeds (very long run)
 TIMESTEPS=2000000          # Max env steps per session (Calvano-style x-axis cap at 2M)
-PATIENCE=100000            # Stop if max KL < threshold for 100k consecutive PPO updates
-KL_THRESH=0.00001          # 1e-5: strict KL vs 0.01 in ppo.py default; often hits --total-timesteps before patience streak completes
+# Stopping: convergence-mode delta (normalized profit stable) or kl (policy KL small)
+CONVERGENCE_MODE=delta     # switch to kl for KL-based early stop
+PATIENCE=100              # consecutive PPO updates satisfying the criterion (delta or kl)
+DELTA_CONV_THRESH=0.01     # delta mode: max_f |Δ_f − Δ_f_prev| must stay below this
+KL_THRESH=0.01             # kl mode: max_f KL must stay below this; still logged in delta mode
 EPISODE_LEN=168            # 1 week of hourly intervals
 
 # ── Run experiments for each history length ──────────────────────────
@@ -69,7 +72,9 @@ for H in $H_LIST; do
         --history-len "$H" \
         --num-sessions "$SESSIONS" \
         --total-timesteps "$TIMESTEPS" \
+        --convergence-mode "$CONVERGENCE_MODE" \
         --convergence-patience "$PATIENCE" \
+        --delta-convergence-threshold "$DELTA_CONV_THRESH" \
         --kl-threshold "$KL_THRESH" \
         --episode-len "$EPISODE_LEN" \
         --rollout-len 2048 \
