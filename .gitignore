@@ -4,3 +4,7 @@ results/
 *.pt
 slurm-*.out
 slurm-*.err
+
+# Local installers (GitHub file-size limit)
+Miniconda*.sh
+Anaconda*.sh
