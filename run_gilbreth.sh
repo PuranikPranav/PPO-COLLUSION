@@ -14,7 +14,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --time=24:00:00
+# Long jobs: 1000 sessions × 2M steps each is weeks of GPU time in practice—raise if the scheduler allows.
+#SBATCH --time=7-00:00:00
 #SBATCH --mem=50G
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
@@ -52,10 +53,10 @@ else
     source "$ENV_DIR/bin/activate"
 fi
 
-# ── Experiment parameters ────────────────────────────────────────────
-SESSIONS=50               # Calvano uses 1000; 50 is practical for PPO
-TIMESTEPS=5000000          # Max steps per session — agents need ~3-5M to plateau
-PATIENCE=100               # Converge if KL < threshold for 100 consecutive PPO updates
+# ── Experiment parameters (Calvano-scale paper settings) ─────────────
+SESSIONS=1000              # Average metrics over 1000 independent seeds (very long run)
+TIMESTEPS=2000000          # Max env steps per session (Calvano-style x-axis cap at 2M)
+PATIENCE=100000            # Stop if max KL < threshold for 100k consecutive PPO updates
 KL_THRESH=0.01             # KL divergence threshold for convergence
 EPISODE_LEN=168            # 1 week of hourly intervals
 
@@ -78,8 +79,8 @@ for H in $H_LIST; do
         --cuda \
         --output-dir "results/h${H}"
 
-    # Per-H figure
-    python experiments/plot_results.py "results/h${H}" --save "figures/"
+    # Calvano-style Fig 1–2 only (greedy quantities + greedy Δ); full grid is heavy with 1000 sessions
+    python experiments/plot_results.py "results/h${H}" --save "figures/" --calvano-paper
     echo "Finished H=$H. Results in results/h${H}"
 done
 

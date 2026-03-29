@@ -14,6 +14,7 @@ Cross-history comparison (--compare):
 Usage
 -----
     python experiments/plot_results.py results/h1 --save figures/
+    python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
     python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
 """
 
@@ -24,6 +25,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import FuncFormatter
+
+# X-axis ticks for Calvano-style learning curves (environment steps)
+CALVANO_XTICKS = np.array([1, 500_000, 1_000_000, 1_500_000, 2_000_000], dtype=float)
 
 
 def load_sessions(run_dir: Path):
@@ -51,12 +56,40 @@ def load_sessions(run_dir: Path):
     return config, sessions
 
 
-def aggregate_metric(sessions, key, max_steps=None):
+def _finite_interp_on_steps(ref_steps, steps, vals):
+    """Linear interp; non-finite vals replaced via 1d fill before interp."""
+    vals = np.asarray(vals, dtype=float)
+    steps = np.asarray(steps, dtype=float)
+    if len(steps) == 0:
+        return np.zeros(len(ref_steps))
+    good = np.isfinite(vals)
+    if not good.any():
+        return np.zeros(len(ref_steps))
+    if not good.all():
+        idx = np.arange(len(vals))
+        vals = np.interp(
+            idx,
+            idx[good],
+            vals[good],
+            left=vals[np.argmax(good)],
+            right=vals[len(vals) - 1 - np.argmax(good[::-1])],
+        )
+    return np.interp(
+        ref_steps,
+        steps,
+        vals,
+        left=vals[0],
+        right=vals[-1],
+    )
+
+
+def aggregate_metric(sessions, key, max_steps=None, default_for_missing=0):
     """Collect a metric across sessions, aligned by step. Returns (steps, mean, std)."""
     all_series = []
     for sess in sessions:
-        steps = [r["step"] for r in sess["metrics"]]
-        vals = [r.get(key, 0) for r in sess["metrics"]]
+        m = sess.get("metrics") or []
+        steps = [r["step"] for r in m]
+        vals = [r.get(key, default_for_missing) for r in m]
         all_series.append((steps, vals))
 
     if not all_series:
@@ -64,18 +97,137 @@ def aggregate_metric(sessions, key, max_steps=None):
 
     # Use the longest session's step grid
     ref_steps = max(all_series, key=lambda x: len(x[0]))[0]
-    if max_steps:
+    if max_steps is not None:
         ref_steps = [s for s in ref_steps if s <= max_steps]
 
     matrix = []
     for steps, vals in all_series:
-        interpolated = np.interp(ref_steps, steps, vals,
-                                 left=vals[0] if vals else 0,
-                                 right=vals[-1] if vals else 0)
+        interpolated = _finite_interp_on_steps(np.array(ref_steps, dtype=float), steps, vals)
         matrix.append(interpolated)
 
     matrix = np.array(matrix)
-    return ref_steps, matrix.mean(axis=0), matrix.std(axis=0)
+    mean = np.nanmean(matrix, axis=0)
+    std = np.nanstd(matrix, axis=0)
+    return ref_steps, mean, std
+
+
+def _metrics_has_key(sessions, key: str) -> bool:
+    for sess in sessions:
+        for r in sess.get("metrics") or []:
+            if key in r:
+                return True
+    return False
+
+
+def _firm_comp_mono_total_mw(config):
+    bench = config["benchmarks"]
+    cg = bench["competitive"]["gens"]
+    mg = bench["monopoly"]["gens"]
+    comp = (cg[0] + cg[1], cg[2])
+    mono = (mg[0] + mg[1], mg[2])
+    return comp, mono
+
+
+def _calvano_xtick_formatter():
+    def fmt(x, _pos):
+        if abs(x - 1) < 5000:
+            return "1"
+        if abs(x - 500_000) < 10_000:
+            return "0.5M"
+        if abs(x - 1_000_000) < 10_000:
+            return "1M"
+        if abs(x - 1_500_000) < 10_000:
+            return "1.5M"
+        if abs(x - 2_000_000) < 10_000:
+            return "2M"
+        if x >= 1e6:
+            s = f"{x / 1e6:.1f}M"
+            return s.replace(".0M", "M")
+        return f"{int(round(x)):,}"
+
+    return FuncFormatter(fmt)
+
+
+def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=None):
+    """
+    Figure 1: greedy (deterministic-policy) mean quantity vs steps + competitive/monopoly horizontals.
+    Figure 2: normalized profit Δ from greedy counterfactual clear vs steps.
+    X-axis: 1, 0.5M, 1M, 1.5M, 2M timesteps (capped at 2M for display).
+    """
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    max_steps = 2_000_000
+    comp, mono = _firm_comp_mono_total_mw(config)
+
+    use_greedy = _metrics_has_key(sessions, "firm_0_greedy_gen")
+    gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
+    dkey = "firm_{}_greedy_delta" if _metrics_has_key(sessions, "firm_0_greedy_delta") else "firm_{}_delta"
+
+    fig1, ax1 = plt.subplots(figsize=(10, 5))
+    for fid in range(2):
+        steps, mean, std = aggregate_metric(sessions, gkey.format(fid), max_steps=max_steps)
+        if not steps:
+            continue
+        c = f"C{fid}"
+        ax1.plot(steps, mean, color=c, label=f"Firm {fid} (greedy mean MW)" if use_greedy else f"Firm {fid}")
+        if len(sessions) > 1:
+            ax1.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
+
+    ax1.axhline(comp[0], ls="--", color="C0", alpha=0.55, linewidth=1.0, label="Competitive (F0)")
+    ax1.axhline(comp[1], ls="--", color="C1", alpha=0.55, linewidth=1.0, label="Competitive (F1)")
+    ax1.axhline(mono[0], ls=":", color="C0", alpha=0.75, linewidth=1.2, label="Monopoly (F0)")
+    ax1.axhline(mono[1], ls=":", color="C1", alpha=0.75, linewidth=1.2, label="Monopoly (F1)")
+    ax1.set_xlim(0, max_steps)
+    ax1.set_xticks(CALVANO_XTICKS)
+    ax1.xaxis.set_major_formatter(_calvano_xtick_formatter())
+    ax1.set_xlabel("Timesteps")
+    ax1.set_ylabel("Quantity (MW)")
+    ax1.set_title(
+        "Evolution of greedy output levels (mean deterministic policy on rollout obs)"
+        + ("" if use_greedy else " — fallback: realized avg gen (re-run with new ppo.py)")
+    )
+    ax1.legend(fontsize=7, loc="best")
+    fig1.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
+    fig1.tight_layout()
+    out1 = save_dir / f"calvano_fig1_quantities_h{h}.png"
+    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    plt.close(fig1)
+    print(f"Saved → {out1}")
+
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    y_hi = 1.15
+    for fid in range(2):
+        steps, mean, std = aggregate_metric(sessions, dkey.format(fid), max_steps=max_steps)
+        if not steps:
+            continue
+        c = f"C{fid}"
+        lbl = f"Firm {fid} Δ (greedy)" if "greedy" in dkey else f"Firm {fid} Δ"
+        ax2.plot(steps, mean, color=c, label=lbl)
+        if len(sessions) > 1:
+            ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
+            y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
+        else:
+            y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
+
+    ax2.axhline(0, ls="--", color="grey", alpha=0.6, linewidth=0.9, label="Competitive (Δ=0)")
+    ax2.axhline(1, ls="--", color="black", alpha=0.6, linewidth=0.9, label="Monopoly (Δ=1)")
+    ax2.set_xlim(0, max_steps)
+    ax2.set_xticks(CALVANO_XTICKS)
+    ax2.xaxis.set_major_formatter(_calvano_xtick_formatter())
+    ax2.set_xlabel("Timesteps")
+    ax2.set_ylabel("Normalized profit gain Δ")
+    ax2.set_title(
+        "Evolution of profit gains (greedy counterfactual)"
+        if "greedy" in dkey
+        else "Evolution of Δ (realized episode profits — re-run with new ppo.py for greedy Δ)"
+    )
+    ax2.set_ylim(-0.1, max(y_hi, 1.15))
+    ax2.legend(fontsize=8, loc="best")
+    fig2.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
+    fig2.tight_layout()
+    out2 = save_dir / f"calvano_fig2_profit_gain_h{h}.png"
+    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"Saved → {out2}")
 
 
 # ====================== Figure 1: Generation evolution ======================
@@ -378,6 +530,8 @@ def main():
                         help="One or more run directories to plot")
     parser.add_argument("--compare", action="store_true",
                         help="Generate a cross-history comparison figure")
+    parser.add_argument("--calvano-paper", action="store_true",
+                        help="Save only Calvano-style Fig 1 (quantities) and Fig 2 (Δ vs timesteps)")
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
     args = parser.parse_args()
@@ -397,6 +551,14 @@ def main():
         config, sessions = load_sessions(rd)
         h = config.get("history_len", "?")
         n = len(sessions)
+
+        if args.calvano_paper:
+            if not args.save:
+                parser.error("--calvano-paper requires --save DIR")
+            save_dir = Path(args.save)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            plot_calvano_paper_figures(config, sessions, save_dir, history_label=h)
+            continue
 
         fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         fig.suptitle(f"PPO Collusion — H={h}  ({n} session{'s' if n>1 else ''})", fontsize=14)

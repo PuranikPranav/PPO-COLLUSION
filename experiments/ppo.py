@@ -12,9 +12,9 @@ Usage
     # Quick single run
     python experiments/ppo.py --history-len 1 --total-timesteps 500000
 
-    # Full Calvano-style experiment (50 sessions, KL-based convergence stopping)
-    python experiments/ppo.py --history-len 1 --num-sessions 50 \
-        --convergence-patience 100 --kl-threshold 0.01 --total-timesteps 2000000 \
+    # Gilbreth-scale (1000 sessions, 2M steps cap, strict KL patience — very long wall time)
+    python experiments/ppo.py --history-len 1 --num-sessions 1000 \
+        --convergence-patience 100000 --kl-threshold 0.01 --total-timesteps 2000000 \
         --output-dir results/h1
 """
 
@@ -356,6 +356,58 @@ def compute_delta(avg_step_profit: float, pi_c: float, pi_m: float) -> float:
     return (avg_step_profit - pi_c) / denom
 
 
+def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_c, pi_m):
+    """
+    Mean deterministic-policy MW per firm over stored rollout observations (post-update
+    actor mean on each row), and Δ from one DC-OPF clear at mean plant outputs.
+    obs_by_firm[fid] is (T, obs_dim) numpy — typically a copy of the buffer before .clear().
+    """
+    if not obs_by_firm:
+        return None
+    n = next(iter(obs_by_firm.values())).shape[0]
+    if n == 0:
+        return None
+
+    gen_per_plant = np.zeros(len(PLANTS), dtype=np.float64)
+    greedy_totals = {}
+    for fid, agent in agents.items():
+        obs_np = obs_by_firm[fid]
+        obs = torch.from_numpy(obs_np.astype(np.float32)).to(agent.device)
+        with torch.no_grad():
+            raw = agent.ac.actor_mean(obs).cpu().numpy()
+        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
+        mw = frac * agent.caps
+        greedy_totals[fid] = float(np.mean(mw.sum(axis=1)))
+        mean_mw = np.mean(mw, axis=0)
+        for j, pidx in enumerate(FIRM_PLANT_IDX[fid]):
+            gen_per_plant[pidx] = mean_mw[j]
+
+    gen_per_node = np.zeros(NUM_NODES, dtype=np.float64)
+    for pidx, plant in enumerate(PLANTS):
+        gen_per_node[plant["node"]] += gen_per_plant[pidx]
+
+    lmps, _demand = env._clear_market(gen_per_node)
+    greedy_delta = {}
+    if lmps is None:
+        for fid in range(NUM_FIRMS):
+            greedy_delta[fid] = float("nan")
+        return {"greedy_totals": greedy_totals, "greedy_delta": greedy_delta}
+
+    profits = {}
+    for fid in range(NUM_FIRMS):
+        p = 0.0
+        for pidx in FIRM_PLANT_IDX[fid]:
+            plant = PLANTS[pidx]
+            g = gen_per_plant[pidx]
+            p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g * g
+        profits[fid] = p
+
+    for fid in range(NUM_FIRMS):
+        greedy_delta[fid] = float(compute_delta(profits[fid], pi_c[fid], pi_m[fid]))
+
+    return {"greedy_totals": greedy_totals, "greedy_delta": greedy_delta}
+
+
 # ======================================================================
 # Post-training analysis
 # ======================================================================
@@ -565,6 +617,12 @@ def train_session(env, benchmarks, args, session_id, device):
                     "std": old_dist.scale.clone(),
                 }
 
+        # Rollout obs for greedy metrics (post-update policy mean on same states)
+        rollout_obs_backup = {
+            fid: agent.buffer.obs[: agent.buffer.ptr].copy()
+            for fid, agent in agents.items()
+        }
+
         # ---------- PPO update ----------
         for fid, agent in agents.items():
             obs_norm = obs_normalizers[fid].normalize(obs[fid])
@@ -598,6 +656,9 @@ def train_session(env, benchmarks, args, session_id, device):
         # ---------- logging ----------
         if (update + 1) % args.log_interval == 0:
             avg_lmp = np.mean(recent_lmps) if recent_lmps else 0
+            gr = compute_greedy_metrics_from_obs(
+                env, agents, rollout_obs_backup, pi_c, pi_m
+            )
             row = {
                 "step": total_steps,
                 "episodes": episode_count,
@@ -613,25 +674,39 @@ def train_session(env, benchmarks, args, session_id, device):
                 row[f"firm_{fid}_avg_gen"] = avg_gen
                 row[f"firm_{fid}_delta"] = float(delta)
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
+                if gr is not None:
+                    row[f"firm_{fid}_greedy_gen"] = gr["greedy_totals"][fid]
+                    row[f"firm_{fid}_greedy_delta"] = gr["greedy_delta"][fid]
             row["max_kl"] = max(last_agent_kls.values())
             row["kl_streak"] = stable_count
             log_rows.append(row)
 
-            if args.num_sessions == 1:
-                d0 = row.get("firm_0_delta", 0)
-                d1 = row.get("firm_1_delta", 0)
-                mk = row.get("max_kl", 0)
-                print(
-                    f"[{total_steps:>8d}] ep {episode_count:>4d} | "
-                    f"LMP ${row['avg_lmp']:.2f} | "
-                    f"Δ0={d0:.3f} Δ1={d1:.3f} | "
-                    f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
-                    f"KL={mk:.2e} streak={stable_count}"
-                )
+            d0 = row.get("firm_0_delta", 0)
+            d1 = row.get("firm_1_delta", 0)
+            mk = row.get("max_kl", 0)
+            sess_prefix = (
+                f"S{session_id + 1}/{args.num_sessions} "
+                if args.num_sessions > 1
+                else ""
+            )
+            print(
+                f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
+                f"LMP ${row['avg_lmp']:.2f} | "
+                f"Δ0={d0:.3f} Δ1={d1:.3f} | "
+                f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
+                f"KL={mk:.2e} streak={stable_count}"
+            )
 
         if converged:
-            if args.num_sessions == 1:
-                print(f"  ✓ Converged at step {total_steps} (KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates)")
+            sess_prefix = (
+                f"S{session_id + 1}/{args.num_sessions} "
+                if args.num_sessions > 1
+                else ""
+            )
+            print(
+                f"  {sess_prefix}✓ Converged at step {total_steps} "
+                f"(KL < {args.kl_threshold} for {args.convergence_patience} consecutive updates)"
+            )
             break
 
     # ---------- post-training analysis ----------
