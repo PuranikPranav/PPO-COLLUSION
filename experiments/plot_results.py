@@ -8,14 +8,16 @@ Per run directory (2x3 figure):
   4. Learned limit strategy
   5–6. Impulse responses (each firm deviates)
 
-Cross-history comparison (--compare):
-  Overlays H=1,2,… on Δ, LMP, max KL, and generation.
+Cross-history comparison:
+  --compare          → 6-panel dashboard (Δ, LMP, KL, generation) → comparison_h1_2_3.png
+  --compare-calvano  → two Calvano-style PNGs (quantity + Δ vs timesteps, H overlaid)
 
 Usage
 -----
     python experiments/plot_results.py results/h1 --save figures/
     python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
     python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
+    python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
 """
 
 import argparse
@@ -225,6 +227,129 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
     fig2.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
     fig2.tight_layout()
     out2 = save_dir / f"calvano_fig2_profit_gain_h{h}.png"
+    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"Saved → {out2}")
+
+
+def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
+    """
+    Same style as --calvano-paper (timesteps vs quantity / vs Δ), but overlay H=1,2,…
+    Two PNGs: quantities (one panel per firm) and normalized profit (one panel per firm).
+    All series are mean ± band across sessions within each run.
+    """
+    runs = []
+    for rd in run_dirs:
+        if not rd.is_dir():
+            continue
+        config, sessions = load_sessions(rd)
+        if sessions:
+            runs.append((config, sessions))
+
+    if len(runs) < 1:
+        print("No valid run directories for Calvano cross-history comparison.")
+        return
+
+    h_labels = [str(c.get("history_len", "?")) for c, _ in runs]
+    tag = "_".join(h_labels)
+    max_steps = 2_000_000
+    comp, mono = _firm_comp_mono_total_mw(runs[0][0])
+
+    use_greedy = all(
+        _metrics_has_key(sessions, "firm_0_greedy_gen") for _, sessions in runs
+    )
+    gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
+    dkey = (
+        "firm_{}_greedy_delta"
+        if all(
+            _metrics_has_key(sessions, "firm_0_greedy_delta")
+            for _, sessions in runs
+        )
+        else "firm_{}_delta"
+    )
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # —— Quantities: Firm 0 | Firm 1 ——
+    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))
+    for fid in range(2):
+        ax = axes1[fid]
+        for i, (config, sessions) in enumerate(runs):
+            h = config.get("history_len", "?")
+            steps, mean, std = aggregate_metric(
+                sessions, gkey.format(fid), max_steps=max_steps
+            )
+            if not steps:
+                continue
+            color = f"C{i}"
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.12, color=color)
+        ax.axhline(
+            comp[fid], ls="--", color="grey", alpha=0.55, linewidth=1.0, label="Competitive"
+        )
+        ax.axhline(
+            mono[fid], ls=":", color="black", alpha=0.75, linewidth=1.1, label="Monopoly"
+        )
+        ax.set_xlim(0, max_steps)
+        ax.set_xticks(CALVANO_XTICKS)
+        ax.xaxis.set_major_formatter(_calvano_xtick_formatter())
+        ax.set_xlabel("Timesteps")
+        ax.set_ylabel("Quantity (MW)")
+        ax.set_title(
+            f"Firm {fid} — "
+            + ("greedy mean MW" if use_greedy else "realized avg gen")
+        )
+        ax.legend(fontsize=7, loc="best")
+    fig1.suptitle(
+        f"Cross-history quantities (session-averaged) — H={', '.join(h_labels)}",
+        fontsize=12,
+        y=1.02,
+    )
+    fig1.tight_layout()
+    out1 = save_dir / f"calvano_compare_quantities_h{tag}.png"
+    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    plt.close(fig1)
+    print(f"Saved → {out1}")
+
+    # —— Normalized profit Δ: Firm 0 | Firm 1 ——
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
+    y_hi = 1.15
+    for fid in range(2):
+        ax = axes2[fid]
+        for i, (config, sessions) in enumerate(runs):
+            h = config.get("history_len", "?")
+            steps, mean, std = aggregate_metric(
+                sessions, dkey.format(fid), max_steps=max_steps
+            )
+            if not steps:
+                continue
+            color = f"C{i}"
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.12, color=color)
+                y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.05)
+            else:
+                y_hi = max(y_hi, float(np.nanmax(mean)) * 1.05)
+        ax.axhline(0, ls="--", color="grey", alpha=0.6, linewidth=0.9, label="Δ=0")
+        ax.axhline(1, ls="--", color="black", alpha=0.6, linewidth=0.9, label="Δ=1")
+        ax.set_xlim(0, max_steps)
+        ax.set_xticks(CALVANO_XTICKS)
+        ax.xaxis.set_major_formatter(_calvano_xtick_formatter())
+        ax.set_xlabel("Timesteps")
+        ax.set_ylabel("Normalized profit gain Δ")
+        lbl = "greedy Δ" if "greedy" in dkey else "realized Δ"
+        ax.set_title(f"Firm {fid} — {lbl}")
+        ax.legend(fontsize=7, loc="best")
+    for ax in axes2:
+        ax.set_ylim(-0.1, max(y_hi, 1.15))
+    fig2.suptitle(
+        f"Cross-history normalized profit (session-averaged) — H={', '.join(h_labels)}",
+        fontsize=12,
+        y=1.02,
+    )
+    fig2.tight_layout()
+    out2 = save_dir / f"calvano_compare_profit_h{tag}.png"
     fig2.savefig(out2, dpi=150, bbox_inches="tight")
     plt.close(fig2)
     print(f"Saved → {out2}")
@@ -529,7 +654,12 @@ def main():
     parser.add_argument("run_dirs", nargs="*", type=Path,
                         help="One or more run directories to plot")
     parser.add_argument("--compare", action="store_true",
-                        help="Generate a cross-history comparison figure")
+                        help="6-panel dashboard (Δ, LMP, KL, gen) across history lengths")
+    parser.add_argument(
+        "--compare-calvano",
+        action="store_true",
+        help="Two Calvano-style figures across H: quantities + normalized Δ (session-averaged)",
+    )
     parser.add_argument("--calvano-paper", action="store_true",
                         help="Save only Calvano-style Fig 1 (quantities) and Fig 2 (Δ vs timesteps)")
     parser.add_argument("--save", type=str, default=None,
@@ -539,6 +669,15 @@ def main():
     run_dirs = [rd for rd in args.run_dirs if rd is not None and str(rd).strip()]
     if not run_dirs:
         parser.error("Provide at least one run directory.")
+
+    if args.compare_calvano:
+        missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
+        if missing:
+            parser.error(f"Not a directory: {', '.join(missing)}")
+        if not args.save:
+            parser.error("--compare-calvano requires --save DIR")
+        plot_calvano_cross_history_comparison(run_dirs, Path(args.save))
+        return
 
     if args.compare:
         missing = [str(rd) for rd in run_dirs if not rd.is_dir()]

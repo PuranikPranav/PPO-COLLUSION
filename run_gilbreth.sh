@@ -91,8 +91,13 @@ done
 
 # ── Cross-history comparison figure ──────────────────────────────────
 # Only when this job runs multiple H values in one allocation. For parallel
-#   sbatch run_gilbreth.sh "1" / "2" / "3", skip here; when all are done run:
-#   python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
+#   sbatch run_gilbreth.sh "1" / "2" / "3", when all three finish run on a login node:
+#     bash compare_histories.sh
+#   or manually:
+#     python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
+#       → calvano_compare_quantities_h1_2_3.png, calvano_compare_profit_h1_2_3.png
+#     python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
+#       → comparison_h1_2_3.png (6-panel: Δ, LMP, KL, gen)
 RUN_DIRS=()
 for H in $H_LIST; do
     if [ -d "results/h${H}" ]; then
