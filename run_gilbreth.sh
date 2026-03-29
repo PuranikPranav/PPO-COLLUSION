@@ -57,7 +57,7 @@ fi
 SESSIONS=1000              # Average metrics over 1000 independent seeds (very long run)
 TIMESTEPS=2000000          # Max env steps per session (Calvano-style x-axis cap at 2M)
 PATIENCE=100000            # Stop if max KL < threshold for 100k consecutive PPO updates
-KL_THRESH=0.01             # KL divergence threshold for convergence
+KL_THRESH=0.00001          # 1e-5: strict KL vs 0.01 in ppo.py default; often hits --total-timesteps before patience streak completes
 EPISODE_LEN=168            # 1 week of hourly intervals
 
 # ── Run experiments for each history length ──────────────────────────
