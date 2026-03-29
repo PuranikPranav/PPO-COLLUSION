@@ -85,13 +85,18 @@ for H in $H_LIST; do
 done
 
 # ── Cross-history comparison figure ──────────────────────────────────
+# Only when this job runs multiple H values in one allocation. For parallel
+#   sbatch run_gilbreth.sh "1" / "2" / "3", skip here; when all are done run:
+#   python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
 RUN_DIRS=()
 for H in $H_LIST; do
     if [ -d "results/h${H}" ]; then
         RUN_DIRS+=("results/h${H}")
     fi
 done
-if [ "${#RUN_DIRS[@]}" -gt 0 ]; then
+N_H=0
+for _ in $H_LIST; do N_H=$((N_H + 1)); done
+if [ "$N_H" -gt 1 ] && [ "${#RUN_DIRS[@]}" -gt 1 ]; then
     python experiments/plot_results.py --compare "${RUN_DIRS[@]}" --save "figures/"
     echo "Comparison figure saved to figures/"
 fi
