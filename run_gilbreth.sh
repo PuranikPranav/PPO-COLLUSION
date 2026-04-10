@@ -22,15 +22,17 @@
 #   results/{delta,kl}/h{1,2,3}/     — training outputs per H and criterion
 #   figures/{delta,kl}/              — per-H Calvano PNGs + cross-H compare PNGs
 #
-# GPU partition (default a30). Override:
-#   sbatch --partition=a100-40gb run_gilbreth.sh "1 2 3" delta
+# GPU partition (default a100-40gb). Same experiment as before: default CRIT=both → delta sweep, then KL.
+#   sbatch run_gilbreth.sh                    # H=1,2,3  delta then kl
+#   sbatch run_gilbreth.sh "1 2 3" both       # explicit
+#   sbatch --partition=a100-80gb run_gilbreth.sh "1 2 3" both
 #SBATCH --job-name=ppo-collusion
 #SBATCH --account=liu334
-#SBATCH --partition=a30
+#SBATCH --partition=a100-40gb
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-task=1
 #SBATCH --time=7-00:00:00
 #SBATCH --mem=50G
 #SBATCH --output=slurm-%j.out
