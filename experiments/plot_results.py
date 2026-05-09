@@ -11,6 +11,8 @@ Per run directory (2x3 figure):
 Cross-history comparison:
   --compare          → 6-panel dashboard (Δ, LMP, KL, generation) → comparison_h1_2_3.png
   --compare-calvano  → two Calvano-style PNGs (quantity + Δ vs timesteps, H overlaid)
+  --compare-generation-profit
+                     → one PNG: generation + profit vs PPO iterations, one row per H
 
 Usage
 -----
@@ -18,15 +20,22 @@ Usage
     python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
     python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
     python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
+    python experiments/plot_results.py --compare-generation-profit results/h1 results/h2 results/h3 --save figures/
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+
+_mpl_cache_dir = Path(os.environ.get("TMPDIR", "/tmp")) / "ppo-collusion-matplotlib-cache"
+_mpl_cache_dir.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_mpl_cache_dir))
+
+import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
 # X-axis ticks for Calvano-style learning curves (environment steps)
@@ -111,6 +120,187 @@ def aggregate_metric(sessions, key, max_steps=None, default_for_missing=0):
     mean = np.nanmean(matrix, axis=0)
     std = np.nanstd(matrix, axis=0)
     return ref_steps, mean, std
+
+
+def _metric_keys(sessions):
+    keys = set()
+    for sess in sessions:
+        for row in sess.get("metrics") or []:
+            keys.update(row.keys())
+    return keys
+
+
+def _numeric_suffix_sort_key(key: str):
+    digits = "".join(ch if ch.isdigit() else " " for ch in key).split()
+    return int(digits[-1]) if digits else 10**9
+
+
+def _aggregate_metric_by_iteration(sessions, key):
+    """Collect a metric across sessions, aligned by PPO update number."""
+    all_series = []
+    for sess in sessions:
+        metrics = sess.get("metrics") or []
+        xs = []
+        vals = []
+        for idx, row in enumerate(metrics):
+            if key not in row:
+                continue
+            val = row.get(key)
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(val):
+                continue
+            x_val = (
+                row.get("ppo_update")
+                or row.get("update")
+                or row.get("upd")
+                or (idx + 1)
+            )
+            try:
+                x_val = float(x_val)
+            except (TypeError, ValueError):
+                x_val = float(idx + 1)
+            xs.append(x_val)
+            vals.append(val)
+        if xs:
+            all_series.append((xs, vals))
+
+    if not all_series:
+        return [], [], []
+
+    ref_x = max(all_series, key=lambda item: len(item[0]))[0]
+    matrix = []
+    ref_arr = np.array(ref_x, dtype=float)
+    for xs, vals in all_series:
+        matrix.append(_finite_interp_on_steps(ref_arr, xs, vals))
+
+    matrix = np.array(matrix)
+    mean = np.nanmean(matrix, axis=0)
+    std = np.nanstd(matrix, axis=0)
+    return ref_x, mean, std
+
+
+def _profit_key_for_firm(config, sessions, fid: int):
+    """Ensure a per-step firm profit metric exists, reconstructing it from Δ if needed."""
+    direct_key = f"firm_{fid}_profit"
+    avg_step_key = f"firm_{fid}_avg_step_profit"
+    ep_key = f"firm_{fid}_ep_profit"
+    delta_key = f"firm_{fid}_delta"
+    keys = _metric_keys(sessions)
+
+    if direct_key in keys:
+        return direct_key
+    if avg_step_key in keys:
+        return avg_step_key
+
+    episode_len = float(config.get("episode_len", 1) or 1)
+    reconstructed_key = f"firm_{fid}_profit_reconstructed"
+    bench = config.get("benchmarks", {})
+    comp = bench.get("competitive", {}).get("profits", {})
+    mono = bench.get("monopoly", {}).get("profits", {})
+    can_reconstruct_from_delta = str(fid) in comp and str(fid) in mono and delta_key in keys
+
+    for sess in sessions:
+        for row in sess.get("metrics") or []:
+            if ep_key in row:
+                row[reconstructed_key] = float(row[ep_key]) / episode_len
+            elif can_reconstruct_from_delta and delta_key in row:
+                pi_c = float(comp[str(fid)])
+                pi_m = float(mono[str(fid)])
+                row[reconstructed_key] = pi_c + float(row[delta_key]) * (pi_m - pi_c)
+
+    return reconstructed_key if reconstructed_key in _metric_keys(sessions) else None
+
+
+def _generation_series_specs(config, sessions):
+    keys = _metric_keys(sessions)
+    plant_keys = sorted(
+        [k for k in keys if k.startswith("plant_") and k.endswith("_avg_gen")],
+        key=_numeric_suffix_sort_key,
+    )
+    if plant_keys:
+        return [
+            (key, f"Plant {_numeric_suffix_sort_key(key)}", f"C{i}")
+            for i, key in enumerate(plant_keys)
+        ], "plant"
+
+    firm_keys = sorted(
+        [k for k in keys if k.startswith("firm_") and k.endswith("_avg_gen")],
+        key=_numeric_suffix_sort_key,
+    )
+    if firm_keys:
+        return [
+            (key, f"Firm {_numeric_suffix_sort_key(key)}", f"C{i}")
+            for i, key in enumerate(firm_keys)
+        ], "firm"
+
+    greedy_keys = sorted(
+        [k for k in keys if k.startswith("firm_") and k.endswith("_greedy_gen")],
+        key=_numeric_suffix_sort_key,
+    )
+    return [
+        (key, f"Firm {_numeric_suffix_sort_key(key)} greedy", f"C{i}")
+        for i, key in enumerate(greedy_keys)
+    ], "firm"
+
+
+def _profit_series_specs(config, sessions):
+    keys = _metric_keys(sessions)
+    plant_keys = sorted(
+        [k for k in keys if k.startswith("plant_") and k.endswith("_profit")],
+        key=_numeric_suffix_sort_key,
+    )
+    if plant_keys:
+        return [
+            (key, f"Plant {_numeric_suffix_sort_key(key)}", f"C{i}")
+            for i, key in enumerate(plant_keys)
+        ], "plant"
+
+    specs = []
+    for fid in range(2):
+        key = _profit_key_for_firm(config, sessions, fid)
+        if key:
+            specs.append((key, f"Firm {fid}", f"C{fid}"))
+    return specs, "firm"
+
+
+def _draw_generation_benchmarks(ax, config, series_kind):
+    bench = config.get("benchmarks", {})
+    comp = bench.get("competitive", {}).get("gens")
+    mono = bench.get("monopoly", {}).get("gens")
+    if not comp or not mono:
+        return
+
+    if series_kind == "plant":
+        for i, val in enumerate(comp):
+            ax.axhline(val, ls="--", color=f"C{i}", alpha=0.22, linewidth=0.8)
+        for i, val in enumerate(mono):
+            ax.axhline(val, ls=":", color=f"C{i}", alpha=0.28, linewidth=0.9)
+        return
+
+    comp_f0 = comp[0] + comp[1]
+    comp_f1 = comp[2]
+    mono_f0 = mono[0] + mono[1]
+    mono_f1 = mono[2]
+    for fid, val in enumerate((comp_f0, comp_f1)):
+        ax.axhline(val, ls="--", color=f"C{fid}", alpha=0.25, linewidth=0.8)
+    for fid, val in enumerate((mono_f0, mono_f1)):
+        ax.axhline(val, ls=":", color=f"C{fid}", alpha=0.32, linewidth=0.9)
+
+
+def _draw_profit_benchmarks(ax, config, series_kind):
+    if series_kind != "firm":
+        return
+    bench = config.get("benchmarks", {})
+    comp = bench.get("competitive", {}).get("profits", {})
+    mono = bench.get("monopoly", {}).get("profits", {})
+    for fid in range(2):
+        if str(fid) in comp:
+            ax.axhline(float(comp[str(fid)]), ls="--", color=f"C{fid}", alpha=0.25, linewidth=0.8)
+        if str(fid) in mono:
+            ax.axhline(float(mono[str(fid)]), ls=":", color=f"C{fid}", alpha=0.32, linewidth=0.9)
 
 
 def _metrics_has_key(sessions, key: str) -> bool:
@@ -674,6 +864,90 @@ def plot_comparison(run_dirs, save_dir=None):
         plt.show()
 
 
+def plot_generation_profit_comparison(run_dirs, save_dir: Path):
+    """One figure: generation quantity and profit against PPO iterations for each H."""
+    runs = []
+    for rd in run_dirs:
+        if not rd.is_dir():
+            continue
+        config, sessions = load_sessions(rd)
+        if sessions:
+            runs.append((config, sessions))
+
+    if not runs:
+        print("No valid run directories found for generation/profit comparison.")
+        return
+
+    h_labels = [str(c.get("history_len", "?")) for c, _ in runs]
+    fig_h = max(5.0, 3.8 * len(runs))
+    fig, axes = plt.subplots(len(runs), 2, figsize=(16, fig_h), squeeze=False)
+    fig.suptitle(
+        f"Generation and Profit vs PPO Iteration — H={', '.join(h_labels)}",
+        fontsize=14,
+        y=0.995,
+    )
+
+    used_firm_fallback = False
+    for row_idx, (config, sessions) in enumerate(runs):
+        h = config.get("history_len", "?")
+        n_sessions = len(sessions)
+
+        gen_ax = axes[row_idx, 0]
+        gen_specs, gen_kind = _generation_series_specs(config, sessions)
+        used_firm_fallback |= gen_kind == "firm"
+        for key, label, color in gen_specs:
+            x, mean, std = _aggregate_metric_by_iteration(sessions, key)
+            if not x:
+                continue
+            gen_ax.plot(x, mean, color=color, linewidth=1.6, label=label)
+            if n_sessions > 1:
+                gen_ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.12, linewidth=0)
+        _draw_generation_benchmarks(gen_ax, config, gen_kind)
+        if not gen_specs:
+            gen_ax.text(0.5, 0.5, "No generation metric found", ha="center", va="center", transform=gen_ax.transAxes)
+        gen_ax.set_title(f"Generation quantity — H={h}")
+        gen_ax.set_xlabel("PPO iteration")
+        gen_ax.set_ylabel("Generation (MW)")
+        gen_ax.grid(alpha=0.25)
+        gen_ax.legend(fontsize=8, loc="best")
+
+        profit_ax = axes[row_idx, 1]
+        profit_specs, profit_kind = _profit_series_specs(config, sessions)
+        used_firm_fallback |= profit_kind == "firm"
+        for key, label, color in profit_specs:
+            x, mean, std = _aggregate_metric_by_iteration(sessions, key)
+            if not x:
+                continue
+            profit_ax.plot(x, mean, color=color, linewidth=1.6, label=label)
+            if n_sessions > 1:
+                profit_ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.12, linewidth=0)
+        _draw_profit_benchmarks(profit_ax, config, profit_kind)
+        if not profit_specs:
+            profit_ax.text(0.5, 0.5, "No profit metric found", ha="center", va="center", transform=profit_ax.transAxes)
+        profit_ax.set_title(f"Profit — H={h}")
+        profit_ax.set_xlabel("PPO iteration")
+        profit_ax.set_ylabel("Profit ($/step)")
+        profit_ax.grid(alpha=0.25)
+        profit_ax.legend(fontsize=8, loc="best")
+
+    if used_firm_fallback:
+        fig.text(
+            0.01,
+            0.01,
+            "Note: saved comparison metrics are firm-level unless plant_* metrics are present; "
+            "Firm 0 aggregates its two plants.",
+            fontsize=8,
+            color="0.35",
+        )
+
+    fig.tight_layout(rect=(0, 0.02, 1, 0.985))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / f"generation_profit_h{'_'.join(h_labels)}.png"
+    fig.savefig(out, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved → {out}")
+
+
 # ====================== Main ======================
 def main():
     parser = argparse.ArgumentParser(description="Calvano-style plots for PPO collusion")
@@ -685,6 +959,11 @@ def main():
         "--compare-calvano",
         action="store_true",
         help="Two Calvano-style figures across H: quantities + normalized Δ (session-averaged)",
+    )
+    parser.add_argument(
+        "--compare-generation-profit",
+        action="store_true",
+        help="One PNG across H: generation quantity + profit vs PPO iterations",
     )
     parser.add_argument("--calvano-paper", action="store_true",
                         help="Save only Calvano-style Fig 1 (quantities) and Fig 2 (Δ vs timesteps)")
@@ -703,6 +982,15 @@ def main():
         if not args.save:
             parser.error("--compare-calvano requires --save DIR")
         plot_calvano_cross_history_comparison(run_dirs, Path(args.save))
+        return
+
+    if args.compare_generation_profit:
+        missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
+        if missing:
+            parser.error(f"Not a directory: {', '.join(missing)}")
+        if not args.save:
+            parser.error("--compare-generation-profit requires --save DIR")
+        plot_generation_profit_comparison(run_dirs, Path(args.save))
         return
 
     if args.compare:
