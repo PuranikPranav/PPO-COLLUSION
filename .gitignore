@@ -8,3 +8,11 @@ slurm-*.err
 # Local installers (GitHub file-size limit)
 Miniconda*.sh
 Anaconda*.sh
+
+# Local edits / snapshots (keep out of version control)
+*.backup
+*.before-*
+
+# LaunchAgent sync logs
+scripts/*.launchd.log
+scripts/*.launchd.err
