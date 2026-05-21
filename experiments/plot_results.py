@@ -669,6 +669,195 @@ def plot_impulse_response(axes, config, sessions):
         ax.legend(fontsize=8)
 
 
+# ====================== Advisor-friendly deviation explainer =================
+def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=None):
+    """
+    Advisor-friendly impulse-response figure for the deviation experiment.
+
+    Layout (one column per deviating firm):
+      Row 1 — total generation MW per firm vs period
+              (deviator solid + emphasized, rival dashed, resting reference, t=0 marker)
+      Row 2 — quantity-weighted average LMP vs period
+              (with competitive / monopoly horizontal references)
+
+    Each curve is mean ± std across the run's sessions.
+    """
+    if not sessions:
+        print("No sessions for deviation explainer.")
+        return
+
+    num_firms = 2
+    gen_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
+    lmp_by_dev = {str(d): [] for d in range(num_firms)}
+    resting_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
+
+    for sess in sessions:
+        de = sess.get("deviation_experiment", {}) or {}
+        for dev_str, entry in de.items():
+            if not entry:
+                continue
+            for fstr in [str(f) for f in range(num_firms)]:
+                trace = entry.get("gen", {}).get(fstr)
+                if trace:
+                    gen_by_dev[dev_str][fstr].append(np.asarray(trace, dtype=float))
+                rest_val = entry.get("resting", {}).get(fstr)
+                if rest_val is not None:
+                    resting_by_dev[dev_str][fstr].append(float(rest_val))
+            lmp = entry.get("lmp")
+            if lmp:
+                lmp_by_dev[dev_str].append(np.asarray(lmp, dtype=float))
+
+    deviators = sorted(
+        [d for d in gen_by_dev if any(gen_by_dev[d][f] for f in gen_by_dev[d])],
+        key=int,
+    )
+    if not deviators:
+        print("No deviation traces in sessions.")
+        return
+
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    bench = config.get("benchmarks", {})
+    comp_lmp = bench.get("competitive", {}).get("avg_lmp")
+    mono_lmp = bench.get("monopoly", {}).get("avg_lmp")
+    dev_frac = float(config.get("deviation_frac", 0.20))
+
+    n_cols = len(deviators)
+    fig, axes = plt.subplots(2, n_cols, figsize=(7.0 * n_cols, 8.0), squeeze=False)
+    fig.suptitle(
+        "Deviation experiment — does a unilateral output increase trigger a price war?  "
+        f"(H={h}, {len(sessions)} sessions)",
+        fontsize=13,
+        y=1.0,
+    )
+
+    for col, dev_str in enumerate(deviators):
+        gen_ax = axes[0, col]
+        lmp_ax = axes[1, col]
+
+        # ---- Generation panel ----
+        for fstr in [str(f) for f in range(num_firms)]:
+            mats = gen_by_dev[dev_str][fstr]
+            if not mats:
+                continue
+            T = min(len(arr) for arr in mats)
+            matrix = np.stack([arr[:T] for arr in mats])
+            mean = matrix.mean(axis=0)
+            std = matrix.std(axis=0)
+            t = np.arange(T)
+            is_dev = fstr == dev_str
+            color = f"C{int(fstr)}"
+            lw = 2.2 if is_dev else 1.6
+            ls = "-" if is_dev else "--"
+            lbl = f"Firm {fstr}" + (" — deviator" if is_dev else " — rival (response)")
+            gen_ax.plot(t, mean, color=color, lw=lw, ls=ls, label=lbl)
+            if matrix.shape[0] > 1:
+                gen_ax.fill_between(t, mean - std, mean + std, color=color, alpha=0.15)
+
+            rests = resting_by_dev[dev_str][fstr]
+            if rests:
+                gen_ax.axhline(
+                    float(np.mean(rests)),
+                    color=color,
+                    ls=":",
+                    alpha=0.55,
+                    lw=0.9,
+                    label=f"Firm {fstr} resting"
+                    + (" (pre-deviation)" if is_dev else ""),
+                )
+
+        gen_ax.axvline(0, color="red", ls="--", alpha=0.55, lw=1.0)
+        gen_ax.text(
+            0.02,
+            0.97,
+            f"t=0: deviator forced to +{dev_frac:.0%} for one step,\n"
+            "then both play their learned deterministic policy.",
+            transform=gen_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="0.25",
+        )
+        gen_ax.set_title(f"Firm {dev_str} deviates  →  generation response")
+        gen_ax.set_xlabel("Period after deviation")
+        gen_ax.set_ylabel("Total generation (MW)")
+        gen_ax.grid(alpha=0.25)
+        gen_ax.legend(fontsize=8, loc="best")
+
+        # ---- LMP panel ----
+        mats = lmp_by_dev[dev_str]
+        if mats:
+            T = min(len(arr) for arr in mats)
+            matrix = np.stack([arr[:T] for arr in mats])
+            mean = matrix.mean(axis=0)
+            std = matrix.std(axis=0)
+            t = np.arange(T)
+            lmp_ax.plot(t, mean, color="black", lw=1.8, label="Avg LMP (qty-weighted)")
+            if matrix.shape[0] > 1:
+                lmp_ax.fill_between(t, mean - std, mean + std, color="black", alpha=0.12)
+            if len(mean):
+                lmp_ax.scatter(
+                    [0],
+                    [mean[0]],
+                    color="red",
+                    zorder=5,
+                    s=46,
+                    label=f"At deviation: ${mean[0]:.2f}",
+                )
+                lmp_ax.scatter(
+                    [T - 1],
+                    [mean[-1]],
+                    color="green",
+                    zorder=5,
+                    s=46,
+                    label=f"After {T - 1} steps: ${mean[-1]:.2f}",
+                )
+
+        if comp_lmp is not None:
+            lmp_ax.axhline(
+                comp_lmp,
+                color="grey",
+                ls="--",
+                lw=1.0,
+                alpha=0.7,
+                label=f"Competitive (${comp_lmp:.2f})",
+            )
+        if mono_lmp is not None:
+            lmp_ax.axhline(
+                mono_lmp,
+                color="black",
+                ls=":",
+                lw=1.0,
+                alpha=0.75,
+                label=f"Monopoly (${mono_lmp:.2f})",
+            )
+
+        lmp_ax.axvline(0, color="red", ls="--", alpha=0.55, lw=1.0)
+        lmp_ax.set_title(f"Firm {dev_str} deviates  →  price response")
+        lmp_ax.set_xlabel("Period after deviation")
+        lmp_ax.set_ylabel("Avg LMP ($/MWh)")
+        lmp_ax.grid(alpha=0.25)
+        lmp_ax.legend(fontsize=8, loc="best")
+
+    fig.text(
+        0.01,
+        0.005,
+        "Reading guide: at t=0 the deviator is forced above its resting output. "
+        "If the rival accommodates (no punishment) its curve stays near its resting line "
+        "and avg LMP reverts toward the pre-deviation level within a few periods. "
+        "Persistent price drops well below the resting LMP would indicate a price-war response.",
+        fontsize=8,
+        color="0.30",
+    )
+
+    fig.tight_layout(rect=(0, 0.04, 1, 0.97))
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / f"deviation_explainer_h{h}.png"
+    fig.savefig(out, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved → {out}")
+
+
 # ====================== Figure 5: KL divergence evolution ======================
 def _positive_series_for_log(y, lo=1e-12):
     """Avoid log-scale warnings / invalid values from zeros or missing metrics."""
@@ -864,6 +1053,164 @@ def plot_comparison(run_dirs, save_dir=None):
         plt.show()
 
 
+def plot_comparison_delta(run_dirs, save_dir=None):
+    """
+    Cross-history dashboard for delta-mode runs only.
+
+    Identical layout to plot_comparison except the KL panel is removed and
+    replaced by `delta_max_jump` — the actual convergence diagnostic used by
+    --convergence-mode delta (max_f |Δ_f − Δ_f,prev| over firms, log-y).
+
+    Output: figures/.../comparison_delta_h{H_LIST}.png
+    """
+    runs = []
+    for rd in run_dirs:
+        config, sessions = load_sessions(rd)
+        if sessions:
+            runs.append((config, sessions))
+
+    if not runs:
+        print("No valid run directories found for delta comparison.")
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    h_labels = [str(c.get("history_len", "?")) for c, _ in runs]
+    fig.suptitle(
+        f"Cross-History Comparison (delta mode) — H={', '.join(h_labels)}",
+        fontsize=14,
+    )
+
+    colors_h = {str(c.get("history_len", i)): f"C{i}" for i, (c, _) in enumerate(runs)}
+
+    # --- (0,0): Δ Firm 0 ---
+    ax = axes[0, 0]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_0_delta")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
+    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
+    ax.set_ylabel("Δ (Firm 0)")
+    ax.set_title("Collusion Index Δ — Firm 0")
+    ax.legend(fontsize=8)
+
+    # --- (0,1): Δ Firm 1 ---
+    ax = axes[0, 1]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_1_delta")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
+    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
+    ax.set_ylabel("Δ (Firm 1)")
+    ax.set_title("Collusion Index Δ — Firm 1")
+    ax.legend(fontsize=8)
+
+    # --- (0,2): Avg LMP ---
+    ax = axes[0, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "avg_lmp")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    bench = runs[0][0].get("benchmarks", {})
+    if bench:
+        ax.axhline(bench["competitive"]["avg_lmp"], ls="--", color="green", alpha=0.5,
+                   linewidth=0.8, label="Competitive LMP")
+        ax.axhline(bench["monopoly"]["avg_lmp"], ls=":", color="red", alpha=0.5,
+                   linewidth=0.8, label="Monopoly LMP")
+    ax.set_ylabel("Avg LMP ($/MWh)")
+    ax.set_title("Average LMP")
+    ax.legend(fontsize=8)
+
+    # --- (1,0): Δ-jump diagnostic — replaces KL panel ---
+    ax = axes[1, 0]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(
+            sessions, "delta_max_jump", default_for_missing=float("nan")
+        )
+        if steps:
+            m = _positive_series_for_log(mean)
+            ax.plot(steps, m, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(
+                    steps,
+                    _positive_series_for_log(mean - std),
+                    _positive_series_for_log(mean + std),
+                    alpha=0.1,
+                    color=color,
+                )
+    delta_thresh = runs[0][0].get("delta_convergence_threshold", 0.01)
+    ax.axhline(
+        delta_thresh,
+        ls="--",
+        color="red",
+        alpha=0.5,
+        linewidth=0.8,
+        label=f"Δ-threshold ({delta_thresh})",
+    )
+    ax.set_ylabel("max_f |Δ_f − Δ_f, prev|")
+    ax.set_yscale("log")
+    ax.set_title("Δ-Stability Convergence Diagnostic")
+    ax.legend(fontsize=8)
+
+    # --- (1,1): Generation Firm 0 ---
+    ax = axes[1, 1]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_0_avg_gen")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.set_ylabel("Avg Generation (MW)")
+    ax.set_title("Generation — Firm 0")
+    ax.legend(fontsize=8)
+
+    # --- (1,2): Generation Firm 1 ---
+    ax = axes[1, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "firm_1_avg_gen")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    ax.set_ylabel("Avg Generation (MW)")
+    ax.set_title("Generation — Firm 1")
+    ax.legend(fontsize=8)
+
+    for row in axes:
+        for a in row:
+            a.set_xlabel("Timesteps")
+
+    fig.tight_layout()
+
+    if save_dir:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        fname = save_path / f"comparison_delta_h{'_'.join(h_labels)}.png"
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
+        print(f"Saved → {fname}")
+    else:
+        plt.show()
+
+
 def plot_generation_profit_comparison(run_dirs, save_dir: Path):
     """One figure: generation quantity and profit against PPO iterations for each H."""
     runs = []
@@ -956,6 +1303,12 @@ def main():
     parser.add_argument("--compare", action="store_true",
                         help="6-panel dashboard (Δ, LMP, KL, gen) across history lengths")
     parser.add_argument(
+        "--compare-delta",
+        action="store_true",
+        help="6-panel dashboard for delta-mode runs only "
+        "(KL panel replaced by Δ-jump convergence diagnostic).",
+    )
+    parser.add_argument(
         "--compare-calvano",
         action="store_true",
         help="Two Calvano-style figures across H: quantities + normalized Δ (session-averaged)",
@@ -967,6 +1320,11 @@ def main():
     )
     parser.add_argument("--calvano-paper", action="store_true",
                         help="Save only Calvano-style Fig 1 (quantities) and Fig 2 (Δ vs timesteps)")
+    parser.add_argument(
+        "--deviation-explainer",
+        action="store_true",
+        help="Advisor-friendly impulse-response figure: generation + LMP per deviator (one PNG per run dir).",
+    )
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
     args = parser.parse_args()
@@ -998,6 +1356,27 @@ def main():
         if missing:
             parser.error(f"Not a directory: {', '.join(missing)}")
         plot_comparison(run_dirs, save_dir=args.save)
+        return
+
+    if args.compare_delta:
+        missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
+        if missing:
+            parser.error(f"Not a directory: {', '.join(missing)}")
+        plot_comparison_delta(run_dirs, save_dir=args.save)
+        return
+
+    if args.deviation_explainer:
+        missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
+        if missing:
+            parser.error(f"Not a directory: {', '.join(missing)}")
+        if not args.save:
+            parser.error("--deviation-explainer requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_deviation_explainer(config, sessions, save_dir, history_label=h)
         return
 
     for rd in run_dirs:

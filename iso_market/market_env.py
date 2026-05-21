@@ -59,14 +59,75 @@ class ElectricityMarketEnv:
 
         self._build_cvxpy_problem()
 
-        # Baseline LMPs (all firms at 50 % capacity) used to seed the history
-        baseline_gen = np.zeros(NUM_NODES)
-        for p in PLANTS:
-            baseline_gen[p["node"]] += p["cap"] * 0.5
-        lmps, _ = self._clear_market(baseline_gen)
-        self._baseline_lmps = lmps if lmps is not None else self.P0 * 0.6
+        # Baseline LMPs that seed `lmp_history` at every env.reset() are taken
+        # from the *perfect-competition* (welfare-maximizing) clear of the same
+        # network. This anchors the agents' initial observation to the
+        # competitive benchmark rather than an arbitrary half-capacity guess,
+        # so any subsequent rise in LMP during training reflects learned
+        # withholding rather than artifacts of the initial state.
+        self._baseline_lmps = self._compute_competitive_lmps()
+        print(
+            "[ElectricityMarketEnv] baseline LMPs (competitive welfare-max): "
+            f"{np.round(self._baseline_lmps, 3).tolist()}  "
+            f"avg=${float(np.mean(self._baseline_lmps)):.2f}"
+        )
 
         self.reset()
+
+    def _compute_competitive_lmps(self) -> np.ndarray:
+        """
+        Solve the perfect-competition / welfare-max problem on the same network
+        used by `_clear_market` and return the resulting nodal LMPs.
+
+        Welfare = Σ_i [P0_i d_i − ½ (P0_i / Q0_i) d_i²] − Σ_p [mc_p g_p + ½ qc_p g_p²]
+        s.t. power balance, line-flow limits, plant caps (g ≥ 0, g ≤ cap).
+        LMP_i = P0_i − (P0_i / Q0_i) d_i.
+        """
+        d = cp.Variable(NUM_NODES, nonneg=True)
+        g_vars = [cp.Variable(nonneg=True) for _ in PLANTS]
+
+        gen_per_node = [0.0] * NUM_NODES
+        for pidx, plant in enumerate(PLANTS):
+            gen_per_node[plant["node"]] = gen_per_node[plant["node"]] + g_vars[pidx]
+        y = cp.hstack([gen_per_node[i] - d[i] for i in range(NUM_NODES)])
+
+        benefit = cp.sum(
+            cp.multiply(self.P0, d)
+            - 0.5 * cp.multiply(self.P0 / self.Q0, cp.square(d))
+        )
+        cost = sum(
+            plant["mc"] * g_vars[pidx]
+            + 0.5 * plant["qc"] * cp.square(g_vars[pidx])
+            for pidx, plant in enumerate(PLANTS)
+        )
+
+        constraints = [
+            cp.sum(y) == 0,
+            self.ptdf @ y <= self.line_limits,
+            self.ptdf @ y >= -self.line_limits,
+        ]
+        constraints += [g_vars[pidx] <= plant["cap"] for pidx, plant in enumerate(PLANTS)]
+
+        prob = cp.Problem(cp.Maximize(benefit - cost), constraints)
+        try:
+            prob.solve(solver=cp.CLARABEL)
+        except Exception:
+            prob.solve()
+
+        if prob.status not in ("optimal", "optimal_inaccurate") or d.value is None:
+            # Fallback: use the previous 50%-capacity seed if the competitive
+            # solve fails for any reason, so training can still proceed.
+            baseline_gen = np.zeros(NUM_NODES)
+            for plant in PLANTS:
+                baseline_gen[plant["node"]] += plant["cap"] * 0.5
+            lmps_fallback, _ = self._clear_market(baseline_gen)
+            return (
+                lmps_fallback
+                if lmps_fallback is not None
+                else (self.P0 * 0.6).astype(np.float64)
+            )
+
+        return (self.P0 - (self.P0 / self.Q0) * d.value).astype(np.float64)
 
     # ------------------------------------------------------------------
     # Parametric CVXPY (compiled once, re-solved with warm start)
@@ -120,7 +181,7 @@ class ElectricityMarketEnv:
     def step(self, actions: dict):
         """
         Parameters
-        ----------
+        ----------ˆ
         actions : dict  {firm_id: np.ndarray of generation MW per plant}
 
         Returns
