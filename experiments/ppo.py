@@ -84,6 +84,20 @@ class RunningNormalizer:
     def normalize(self, x: np.ndarray) -> np.ndarray:
         return ((x - self.mean) / (np.sqrt(self.var) + 1e-8)).astype(np.float32)
 
+    def state_dict(self) -> dict:
+        """Serialize Welford running stats for later reproduction."""
+        return {
+            "mean": self.mean.tolist(),
+            "var": self.var.tolist(),
+            "count": float(self.count),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore Welford running stats from `state_dict`."""
+        self.mean = np.asarray(state["mean"], dtype=np.float64)
+        self.var = np.asarray(state["var"], dtype=np.float64)
+        self.count = float(state["count"])
+
 
 # ======================================================================
 # Rollout buffer (one per agent)
@@ -1051,6 +1065,10 @@ def main(args):
 
         for fid, agent in result["agents"].items():
             torch.save(agent.ac.state_dict(), sess_dir / f"agent_{fid}.pt")
+            norm = result["obs_normalizers"].get(fid)
+            if norm is not None:
+                with open(sess_dir / f"normalizer_{fid}.json", "w") as f:
+                    json.dump(norm.state_dict(), f)
 
         for fid in range(NUM_FIRMS):
             all_final_deltas[str(fid)].append(result["final_delta"][str(fid)])

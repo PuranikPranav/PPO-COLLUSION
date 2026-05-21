@@ -116,6 +116,38 @@ def warmup_normalizers(env: ElectricityMarketEnv, agents: dict,
     return obs
 
 
+def load_or_warm_normalizers(
+    session_dir: Path,
+    env: ElectricityMarketEnv,
+    agents: dict,
+    warmup_steps: int,
+) -> dict:
+    """
+    Prefer normalizer_<fid>.json saved at the end of training (bit-exact
+    reproduction of the trained obs-distribution). Fall back to running a
+    `warmup_steps` deterministic-policy rollout when the JSON file is missing
+    (e.g. for older sessions trained before the normalizer-save patch).
+    """
+    normalizers = {fid: RunningNormalizer(env.obs_dim) for fid in range(NUM_FIRMS)}
+
+    all_present = all(
+        (session_dir / f"normalizer_{fid}.json").exists() for fid in range(NUM_FIRMS)
+    )
+    if all_present:
+        for fid in range(NUM_FIRMS):
+            with open(session_dir / f"normalizer_{fid}.json") as f:
+                normalizers[fid].load_state_dict(json.load(f))
+        print(f"  loaded saved normalizers from {session_dir.name}/")
+        return normalizers
+
+    warmup_normalizers(env, agents, normalizers, n_steps=warmup_steps)
+    print(
+        f"  no normalizer_<fid>.json in {session_dir.name}/ — "
+        f"warmed up via {warmup_steps} deterministic steps"
+    )
+    return normalizers
+
+
 # ----------------------------------------------------------------------
 # Single rollout
 # ----------------------------------------------------------------------
@@ -558,9 +590,9 @@ def main():
 
         env = ElectricityMarketEnv(history_len=history_len, episode_len=episode_len)
         agents = load_session_agents(session_dir, env, hidden=args.hidden_dim, device=device)
-        normalizers = {fid: RunningNormalizer(env.obs_dim) for fid in range(NUM_FIRMS)}
-
-        warmup_normalizers(env, agents, normalizers, n_steps=args.warmup_steps)
+        normalizers = load_or_warm_normalizers(
+            session_dir, env, agents, warmup_steps=args.warmup_steps
+        )
 
         log = run_stochastic_rollout(
             env=env, agents=agents, normalizers=normalizers,
