@@ -45,7 +45,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from scipy.optimize import minimize as scipy_minimize
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -324,55 +323,60 @@ def compute_competitive_benchmark(env: ElectricityMarketEnv):
 
 
 def compute_monopoly_benchmark(env: ElectricityMarketEnv):
-    
-    """Joint profit maximization: all firms act as one monopolist."""
-    caps = np.array([p["cap"] for p in PLANTS])
+    """Joint monopoly via CVXPY: maximize total revenue minus total cost.
 
-    def neg_total_profit(g_flat):
-        g = np.clip(g_flat, 0, caps)
-        gen_per_node = np.zeros(NUM_NODES)
-        for i, plant in enumerate(PLANTS):
-            gen_per_node[plant["node"]] += g[i]
+    Mirrors `compute_competitive_benchmark` exactly except the objective:
+      - revenue at node i is the raw payment P_i * d_i (no 0.5 factor),
+        where P_i = P0_i - (P0_i / Q0_i) d_i, so revenue is concave in d.
+      - cost (quadratic, convex) is identical to the competitive case.
+    Nodal prices are recovered from the inverse demand curve at the optimum,
+    not from the balance-constraint dual (which is the system marginal price
+    for the welfare problem, not the monopolist's price).
+    """
+    import cvxpy as cp
+    from iso_market.node_network import P0, Q0
 
-        lmps, demand = env._clear_market(gen_per_node)
-        if lmps is None:
-            return 1e6
+    P0f, Q0f = P0.astype(float), Q0.astype(float)
+    g1n1 = cp.Variable(nonneg=True)
+    g1n2 = cp.Variable(nonneg=True)
+    g2n2 = cp.Variable(nonneg=True)
+    d = cp.Variable(5, nonneg=True)
 
-        total = 0.0
-        for i, plant in enumerate(PLANTS):
-            total += lmps[plant["node"]] * g[i] - plant["mc"] * g[i] - 0.5 * plant["qc"] * g[i] ** 2
-        return -total
+    revenue = cp.sum(cp.multiply(P0f, d) - cp.multiply(P0f / Q0f, cp.square(d)))
+    cost = (
+        PLANTS[0]["mc"] * g1n1 + 0.5 * PLANTS[0]["qc"] * g1n1 ** 2
+        + PLANTS[1]["mc"] * g1n2 + 0.5 * PLANTS[1]["qc"] * g1n2 ** 2
+        + PLANTS[2]["mc"] * g2n2 + 0.5 * PLANTS[2]["qc"] * g2n2 ** 2
+    )
+    y = cp.hstack([g1n1 - d[0], g1n2 + g2n2 - d[1], -d[2], -d[3], -d[4]])
+    constraints = [
+        cp.sum(y) == 0,
+        env.ptdf @ y <= env.line_limits,
+        env.ptdf @ y >= -env.line_limits,
+        g1n1 <= 150, g1n2 <= 50, g2n2 <= 100,
+    ]
+    prob = cp.Problem(cp.Maximize(revenue - cost), constraints)
+    prob.solve()
 
-    best = None
-    for _ in range(50):
-        x0 = np.random.uniform(0, 1, len(PLANTS)) * caps
-        res = scipy_minimize(neg_total_profit, x0, method="L-BFGS-B",
-                             bounds=[(0, c) for c in caps])
-        if best is None or res.fun < best.fun:
-            best = res
-
-    g_opt = np.clip(best.x, 0, caps)
-    gen_per_node = np.zeros(NUM_NODES)
-    for i, plant in enumerate(PLANTS):
-        gen_per_node[plant["node"]] += g_opt[i]
-    lmps, demand = env._clear_market(gen_per_node)
-    avg_lmp = float(np.sum(lmps * demand) / np.sum(demand)) if np.sum(demand) > 0 else 0
+    lmps = P0f - (P0f / Q0f) * d.value
+    avg_lmp = float(np.sum(lmps * d.value) / np.sum(d.value))
+    g_vals = [g1n1.value, g1n2.value, g2n2.value]
 
     profits = {}
     for fid in range(NUM_FIRMS):
         p = 0.0
         for pidx in FIRM_PLANT_IDX[fid]:
             plant = PLANTS[pidx]
-            g = g_opt[pidx]
+            g = g_vals[pidx]
             p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g ** 2
         profits[fid] = p
 
     return {
         "avg_lmp": avg_lmp,
         "lmps": lmps.tolist(),
-        "gens": [float(g) for g in g_opt],
-        "total_gen": float(np.sum(g_opt)),
-        "total_profit": float(-best.fun),
+        "gens": [float(g) for g in g_vals],
+        "total_gen": float(sum(g_vals)),
+        "total_profit": float(sum(profits.values())),
         "profits": {str(k): float(v) for k, v in profits.items()},
     }
 
