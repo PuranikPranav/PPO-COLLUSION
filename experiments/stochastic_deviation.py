@@ -12,7 +12,7 @@ impulse response across many naturally occurring deviation events.
 
 Assumptions
 -----------
-* Trained policies are frozen — both agents act on `actor_mean` (greedy).
+* Trained policies are frozen — both agents act on the Beta policy mean (greedy).
 * Rival learns nothing about the deviation directly: it only observes nodal
   LMPs through the history window (imperfect monitoring).
 * On a deviation step the deviator's MW per plant is set to
@@ -110,8 +110,8 @@ def warmup_normalizers(env: ElectricityMarketEnv, agents: dict,
             normalizers[fid].update(obs[fid])
             obs_norm = normalizers[fid].normalize(obs[fid])
             actions[fid] = agent.deterministic_action(obs_norm)
-        obs, _rewards, done, _info = env.step(actions)
-        if done:
+        obs, _rewards, done, info = env.step(actions)
+        if done and info.get("error"):
             obs = env.reset()
     return obs
 
@@ -227,7 +227,7 @@ def run_stochastic_rollout(env: ElectricityMarketEnv, agents: dict,
             log["gen_plant"][pidx][t] = float(mw)
 
         obs = obs_next
-        if done:
+        if done and info.get("error"):
             obs = env.reset()
 
     return log
