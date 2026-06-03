@@ -198,16 +198,29 @@ def _profit_key_for_firm(config, sessions, fid: int):
     episode_len = float(config.get("episode_len", 1) or 1)
     reconstructed_key = f"firm_{fid}_profit_reconstructed"
     bench = config.get("benchmarks", {})
-    comp = bench.get("competitive", {}).get("profits", {})
+    cn = bench.get("cournot_nash", {}).get("profits", {})
     mono = bench.get("monopoly", {}).get("profits", {})
-    can_reconstruct_from_delta = str(fid) in comp and str(fid) in mono and delta_key in keys
+    comp = bench.get("competitive", {}).get("profits", {})
+    delta_combined_key = "delta_combined"
+    can_reconstruct_combined = (
+        cn and mono
+        and delta_combined_key in keys
+        and all(str(f) in cn and str(f) in mono for f in range(2))
+    )
 
     for sess in sessions:
         for row in sess.get("metrics") or []:
             if ep_key in row:
                 row[reconstructed_key] = float(row[ep_key]) / episode_len
-            elif can_reconstruct_from_delta and delta_key in row:
-                pi_c = float(comp[str(fid)])
+            elif can_reconstruct_combined and delta_combined_key in row:
+                pi_n = sum(float(cn[str(f)]) for f in range(2))
+                pi_m = sum(float(mono[str(f)]) for f in range(2))
+                total = pi_n + float(row[delta_combined_key]) * (pi_m - pi_n)
+                row[reconstructed_key] = total * (
+                    float(cn.get(str(fid), 0)) / pi_n if pi_n > 1e-8 else 0.5
+                )
+            elif delta_key in keys and str(fid) in mono:
+                pi_c = float(cn.get(str(fid), comp.get(str(fid), 0)))
                 pi_m = float(mono[str(fid)])
                 row[reconstructed_key] = pi_c + float(row[delta_key]) * (pi_m - pi_c)
 
@@ -352,7 +365,19 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
 
     use_greedy = _metrics_has_key(sessions, "firm_0_greedy_gen")
     gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
-    dkey = "firm_{}_greedy_delta" if _metrics_has_key(sessions, "firm_0_greedy_delta") else "firm_{}_delta"
+    if _metrics_has_key(sessions, "greedy_delta_combined"):
+        dkey = "greedy_delta_combined"
+        dkey_per_firm = None
+    elif _metrics_has_key(sessions, "delta_combined"):
+        dkey = "delta_combined"
+        dkey_per_firm = None
+    else:
+        dkey = None
+        dkey_per_firm = (
+            "firm_{}_greedy_delta"
+            if _metrics_has_key(sessions, "firm_0_greedy_delta")
+            else "firm_{}_delta"
+        )
 
     fig1, ax1 = plt.subplots(figsize=(10, 5))
     for fid in range(2):
@@ -387,30 +412,41 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
 
     fig2, ax2 = plt.subplots(figsize=(10, 5))
     y_hi = 1.15
-    for fid in range(2):
-        steps, mean, std = aggregate_metric(sessions, dkey.format(fid), max_steps=max_steps)
-        if not steps:
-            continue
-        c = f"C{fid}"
-        lbl = f"Firm {fid} Δ (greedy)" if "greedy" in dkey else f"Firm {fid} Δ"
-        ax2.plot(steps, mean, color=c, label=lbl)
-        if len(sessions) > 1:
-            ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
-            y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
-        else:
-            y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
+    if dkey_per_firm is None:
+        steps, mean, std = aggregate_metric(sessions, dkey, max_steps=max_steps)
+        if steps:
+            ax2.plot(steps, mean, color="black", label="Δ combined (market)")
+            if len(sessions) > 1:
+                ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color="black")
+                y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
+            else:
+                y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
+    else:
+        for fid in range(2):
+            steps, mean, std = aggregate_metric(
+                sessions, dkey_per_firm.format(fid), max_steps=max_steps
+            )
+            if not steps:
+                continue
+            c = f"C{fid}"
+            ax2.plot(steps, mean, color=c, label=f"Firm {fid} Δ (legacy)")
+            if len(sessions) > 1:
+                ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
+                y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
+            else:
+                y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
 
-    ax2.axhline(0, ls="--", color="grey", alpha=0.6, linewidth=0.9, label="Competitive (Δ=0)")
+    ax2.axhline(0, ls="--", color="grey", alpha=0.6, linewidth=0.9, label="Nash (Δ=0)")
     ax2.axhline(1, ls="--", color="black", alpha=0.6, linewidth=0.9, label="Monopoly (Δ=1)")
     ax2.set_xlim(0, max_steps)
     ax2.set_xticks(CALVANO_XTICKS)
     ax2.xaxis.set_major_formatter(_calvano_xtick_formatter())
     ax2.set_xlabel("Timesteps")
-    ax2.set_ylabel("Normalized profit gain Δ")
+    ax2.set_ylabel("Combined collusion index Δ")
     ax2.set_title(
-        "Evolution of profit gains (greedy counterfactual)"
-        if "greedy" in dkey
-        else "Evolution of Δ (realized episode profits — re-run with new ppo.py for greedy Δ)"
+        "Combined Δ: Σ(π−π^Nash)/Σ(π^Mono−π^Nash)"
+        if dkey_per_firm is None
+        else "Evolution of Δ (legacy per-firm series)"
     )
     ax2.set_ylim(-0.1, max(y_hi, 1.15))
     ax2.legend(fontsize=8, loc="best")
@@ -579,19 +615,26 @@ def plot_generation(ax, config, sessions, label_suffix=""):
 
 # ====================== Figure 2: Δ evolution ======================
 def plot_delta(ax, config, sessions, label_suffix=""):
-    for fid in range(2):
-        steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_delta")
-        if not steps:
-            continue
-        color = f"C{fid}"
-        ax.plot(steps, mean, color=color, label=f"Firm {fid}{label_suffix}")
-        if len(sessions) > 1:
-            ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
+    if _metrics_has_key(sessions, "delta_combined"):
+        steps, mean, std = aggregate_metric(sessions, "delta_combined")
+        if steps:
+            ax.plot(steps, mean, color="black", label=f"Δ combined{label_suffix}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color="black")
+    else:
+        for fid in range(2):
+            steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_delta")
+            if not steps:
+                continue
+            color = f"C{fid}"
+            ax.plot(steps, mean, color=color, label=f"Firm {fid}{label_suffix}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
 
-    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8, label="Competitive (Δ=0)")
-    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8, label="Full collusion (Δ=1)")
-    ax.set_ylabel("Δ (normalized profit gain)")
-    ax.set_title("Evolution of Collusion Index Δ")
+    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8, label="Nash (Δ=0)")
+    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8, label="Monopoly (Δ=1)")
+    ax.set_ylabel("Δ (combined profit gain)")
+    ax.set_title("Evolution of Combined Collusion Index Δ")
     ax.legend(fontsize=8)
 
 
@@ -932,37 +975,59 @@ def plot_comparison(run_dirs, save_dir=None):
 
     colors_h = {str(c.get("history_len", i)): f"C{i}" for i, (c, _) in enumerate(runs)}
 
-    # --- (0,0): Δ evolution per H (Firm 0) ---
+    delta_metric = (
+        "delta_combined"
+        if any(_metrics_has_key(s, "delta_combined") for _, s in runs)
+        else "firm_0_delta"
+    )
+
+    # --- (0,0): Combined Δ (Nash floor) ---
     ax = axes[0, 0]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_0_delta")
+        steps, mean, std = aggregate_metric(sessions, delta_metric)
         if steps:
             ax.plot(steps, mean, color=color, label=f"H={h}")
             if len(sessions) > 1:
                 ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
     ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
     ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
-    ax.set_ylabel("Δ (Firm 0)")
-    ax.set_title("Collusion Index Δ — Firm 0")
+    ax.set_ylabel("Δ combined" if delta_metric == "delta_combined" else "Δ (legacy F0)")
+    ax.set_title("Combined Collusion Index Δ")
     ax.legend(fontsize=8)
 
-    # --- (0,1): Δ evolution per H (Firm 1) ---
+    # --- (0,1): Greedy Δ or per-firm step profit ---
     ax = axes[0, 1]
-    for config, sessions in runs:
-        h = config.get("history_len", "?")
-        color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_1_delta")
-        if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
-            if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
-    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
-    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
-    ax.set_ylabel("Δ (Firm 1)")
-    ax.set_title("Collusion Index Δ — Firm 1")
-    ax.legend(fontsize=8)
+    greedy_key = "greedy_delta_combined"
+    if any(_metrics_has_key(s, greedy_key) for _, s in runs):
+        for config, sessions in runs:
+            h = config.get("history_len", "?")
+            color = colors_h[str(h)]
+            steps, mean, std = aggregate_metric(
+                sessions, greedy_key, default_for_missing=float("nan")
+            )
+            if steps:
+                ax.plot(steps, mean, color=color, label=f"H={h}")
+                if len(sessions) > 1:
+                    ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+        ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
+        ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
+        ax.set_ylabel("Greedy Δ_comb")
+        ax.set_title("Greedy-policy Δ (one-shot clear)")
+    else:
+        for config, sessions in runs:
+            h = config.get("history_len", "?")
+            color = colors_h[str(h)]
+            for fid, ls in ((0, "-"), (1, "--")):
+                steps, mean, std = aggregate_metric(
+                    sessions, f"firm_{fid}_avg_step_profit", default_for_missing=float("nan")
+                )
+                if steps:
+                    ax.plot(steps, mean, color=color, ls=ls, label=f"H={h} F{fid}")
+        ax.set_ylabel("Avg profit ($/step)")
+        ax.set_title("Per-firm step profit")
+    ax.legend(fontsize=7)
 
     # --- (0,2): Avg LMP evolution per H ---
     ax = axes[0, 2]
@@ -974,12 +1039,7 @@ def plot_comparison(run_dirs, save_dir=None):
             ax.plot(steps, mean, color=color, label=f"H={h}")
             if len(sessions) > 1:
                 ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
-    bench = runs[0][0].get("benchmarks", {})
-    if bench:
-        ax.axhline(bench["competitive"]["avg_lmp"], ls="--", color="green", alpha=0.5,
-                    linewidth=0.8, label="Competitive LMP")
-        ax.axhline(bench["monopoly"]["avg_lmp"], ls=":", color="red", alpha=0.5,
-                    linewidth=0.8, label="Monopoly LMP")
+    _add_lmp_benchmark_lines(ax, runs[0][0].get("benchmarks", {}))
     ax.set_ylabel("Avg LMP ($/MWh)")
     ax.set_title("Average LMP")
     ax.legend(fontsize=8)
@@ -1053,13 +1113,42 @@ def plot_comparison(run_dirs, save_dir=None):
         plt.show()
 
 
+def _add_lmp_benchmark_lines(ax, bench: dict):
+    if not bench:
+        return
+    ax.axhline(
+        bench["competitive"]["avg_lmp"],
+        ls="--",
+        color="green",
+        alpha=0.5,
+        linewidth=0.8,
+        label="Competitive LMP",
+    )
+    if "cournot_nash" in bench:
+        ax.axhline(
+            bench["cournot_nash"]["avg_lmp"],
+            ls="-.",
+            color="orange",
+            alpha=0.6,
+            linewidth=0.8,
+            label="Cournot–Nash LMP",
+        )
+    ax.axhline(
+        bench["monopoly"]["avg_lmp"],
+        ls=":",
+        color="red",
+        alpha=0.5,
+        linewidth=0.8,
+        label="Monopoly LMP",
+    )
+
+
 def plot_comparison_delta(run_dirs, save_dir=None):
     """
     Cross-history dashboard for delta-mode runs only.
 
-    Identical layout to plot_comparison except the KL panel is removed and
-    replaced by `delta_max_jump` — the actual convergence diagnostic used by
-    --convergence-mode delta (max_f |Δ_f − Δ_f,prev| over firms, log-y).
+    Uses combined Δ and |Δ_comb − Δ_comb,prev| convergence diagnostic
+    (--convergence-mode delta).
 
     Output: figures/.../comparison_delta_h{H_LIST}.png
     """
@@ -1082,65 +1171,40 @@ def plot_comparison_delta(run_dirs, save_dir=None):
 
     colors_h = {str(c.get("history_len", i)): f"C{i}" for i, (c, _) in enumerate(runs)}
 
-    # --- (0,0): Δ Firm 0 ---
+    delta_metric = (
+        "delta_combined"
+        if any(_metrics_has_key(s, "delta_combined") for _, s in runs)
+        else "firm_0_delta"
+    )
+
+    # --- (0,0): Combined Δ ---
     ax = axes[0, 0]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_0_delta")
+        steps, mean, std = aggregate_metric(sessions, delta_metric)
         if steps:
             ax.plot(steps, mean, color=color, label=f"H={h}")
             if len(sessions) > 1:
                 ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
     ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
     ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
-    ax.set_ylabel("Δ (Firm 0)")
-    ax.set_title("Collusion Index Δ — Firm 0")
+    ax.set_ylabel("Δ combined")
+    ax.set_title("Combined Collusion Index Δ")
     ax.legend(fontsize=8)
 
-    # --- (0,1): Δ Firm 1 ---
+    # --- (0,1): Δ-comb jump (convergence) ---
     ax = axes[0, 1]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_1_delta")
-        if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
-            if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
-    ax.axhline(0, ls="--", color="grey", alpha=0.5, linewidth=0.8)
-    ax.axhline(1, ls="--", color="black", alpha=0.5, linewidth=0.8)
-    ax.set_ylabel("Δ (Firm 1)")
-    ax.set_title("Collusion Index Δ — Firm 1")
-    ax.legend(fontsize=8)
-
-    # --- (0,2): Avg LMP ---
-    ax = axes[0, 2]
-    for config, sessions in runs:
-        h = config.get("history_len", "?")
-        color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "avg_lmp")
-        if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
-            if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
-    bench = runs[0][0].get("benchmarks", {})
-    if bench:
-        ax.axhline(bench["competitive"]["avg_lmp"], ls="--", color="green", alpha=0.5,
-                   linewidth=0.8, label="Competitive LMP")
-        ax.axhline(bench["monopoly"]["avg_lmp"], ls=":", color="red", alpha=0.5,
-                   linewidth=0.8, label="Monopoly LMP")
-    ax.set_ylabel("Avg LMP ($/MWh)")
-    ax.set_title("Average LMP")
-    ax.legend(fontsize=8)
-
-    # --- (1,0): Δ-jump diagnostic — replaces KL panel ---
-    ax = axes[1, 0]
-    for config, sessions in runs:
-        h = config.get("history_len", "?")
-        color = colors_h[str(h)]
+        jump_key = (
+            "delta_combined_jump"
+            if _metrics_has_key(sessions, "delta_combined_jump")
+            else "delta_max_jump"
+        )
         steps, mean, std = aggregate_metric(
-            sessions, "delta_max_jump", default_for_missing=float("nan")
+            sessions, jump_key, default_for_missing=float("nan")
         )
         if steps:
             m = _positive_series_for_log(mean)
@@ -1160,15 +1224,30 @@ def plot_comparison_delta(run_dirs, save_dir=None):
         color="red",
         alpha=0.5,
         linewidth=0.8,
-        label=f"Δ-threshold ({delta_thresh})",
+        label=f"threshold ({delta_thresh})",
     )
-    ax.set_ylabel("max_f |Δ_f − Δ_f, prev|")
+    ax.set_ylabel("|Δ_comb − Δ_comb,prev|")
     ax.set_yscale("log")
     ax.set_title("Δ-Stability Convergence Diagnostic")
     ax.legend(fontsize=8)
 
-    # --- (1,1): Generation Firm 0 ---
-    ax = axes[1, 1]
+    # --- (0,2): Avg LMP ---
+    ax = axes[0, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        steps, mean, std = aggregate_metric(sessions, "avg_lmp")
+        if steps:
+            ax.plot(steps, mean, color=color, label=f"H={h}")
+            if len(sessions) > 1:
+                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+    _add_lmp_benchmark_lines(ax, runs[0][0].get("benchmarks", {}))
+    ax.set_ylabel("Avg LMP ($/MWh)")
+    ax.set_title("Average LMP")
+    ax.legend(fontsize=8)
+
+    # --- (1,0): Generation Firm 0 ---
+    ax = axes[1, 0]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
@@ -1181,8 +1260,8 @@ def plot_comparison_delta(run_dirs, save_dir=None):
     ax.set_title("Generation — Firm 0")
     ax.legend(fontsize=8)
 
-    # --- (1,2): Generation Firm 1 ---
-    ax = axes[1, 2]
+    # --- (1,1): Generation Firm 1 ---
+    ax = axes[1, 1]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
@@ -1194,6 +1273,43 @@ def plot_comparison_delta(run_dirs, save_dir=None):
     ax.set_ylabel("Avg Generation (MW)")
     ax.set_title("Generation — Firm 1")
     ax.legend(fontsize=8)
+
+    # --- (1,2): total profit per step (F0 + F1 episode profit / episode_len) ---
+    ax = axes[1, 2]
+    for config, sessions in runs:
+        h = config.get("history_len", "?")
+        color = colors_h[str(h)]
+        ep_len = float(config.get("episode_len", 168) or 168)
+        steps_list, totals = [], []
+        for sess in sessions:
+            for row in sess.get("metrics") or []:
+                if "step" not in row:
+                    continue
+                p0 = row.get("firm_0_ep_profit", 0) / ep_len
+                p1 = row.get("firm_1_ep_profit", 0) / ep_len
+                steps_list.append(row["step"])
+                totals.append(p0 + p1)
+        if steps_list:
+            ax.plot(steps_list, totals, color=color, alpha=0.5, label=f"H={h} (per session)")
+    bench = runs[0][0].get("benchmarks", {})
+    if bench and "cournot_nash" in bench:
+        ax.axhline(
+            bench["cournot_nash"]["total_profit"],
+            ls="--",
+            color="grey",
+            alpha=0.6,
+            label="Nash total π",
+        )
+        ax.axhline(
+            bench["monopoly"]["total_profit"],
+            ls=":",
+            color="black",
+            alpha=0.6,
+            label="Monopoly total π",
+        )
+    ax.set_ylabel("Total profit ($/step)")
+    ax.set_title("Industry profit")
+    ax.legend(fontsize=7)
 
     for row in axes:
         for a in row:

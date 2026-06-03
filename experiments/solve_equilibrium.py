@@ -168,6 +168,28 @@ class UnconstrainedEquilibriumSolver:
         }
 
 
+def solve_cournot_nash(verbose=True):
+    """
+    Nash–Cournot benchmark (stacked KKT MCP, same as model.mod).
+    Delegates to experiments.ppo.compute_cournot_nash_benchmark.
+    """
+    from iso_market.market_env import ElectricityMarketEnv
+    from experiments.ppo import compute_cournot_nash_benchmark
+
+    env = ElectricityMarketEnv()
+    out = compute_cournot_nash_benchmark(env)
+    if verbose:
+        print("\n--- Cournot–Nash (MCP) ---")
+        print(f"  Avg LMP (qty-weighted): ${out['avg_lmp']:.2f} / MWh")
+        print(f"  Total profit ($/step):  {out['total_profit']:.2f}")
+        print(f"  Generation (MW):        {out['gens']}")
+        print(f"  MCP max residual:       {out['mcp_max_residual']:.2e}")
+        for fid, p in out["profits"].items():
+            print(f"  Firm {fid} profit:        ${float(p):.2f}")
+    return out
+
+
 if __name__ == "__main__":
     solver = EquilibriumSolver()
-    results = solver.solve_competitive()
+    solver.solve_competitive()
+    solve_cournot_nash()

@@ -2,7 +2,7 @@
 Multi-Agent Independent PPO for studying tacit collusion in electricity markets.
 
 Methodology adapted from Calvano, Calzolari, Denicolò & Pastorello (2021):
-  - Normalized collusion metric Δ = (π − πC) / (πM − πC)
+  - Combined collusion index Δ = Σ_f(π̄_f − π_f^Nash) / Σ_f(π_f^Mono − π_f^Nash)
   - Early stopping: --convergence-mode delta, kl (policy KL), or none
   - Multiple independent sessions with different seeds, averaged
   - Post-training analysis: limit strategy + impulse response to deviation
@@ -12,7 +12,7 @@ Usage
     # Quick single run
     python experiments/ppo.py --history-len 1 --total-timesteps 500000
 
-    # Δ-stability (default mode): max |Δ_i - Δ_i_prev| < threshold for N consecutive updates
+    # Δ-stability (default mode): |Δ_comb − Δ_comb,prev| < threshold for N consecutive updates
     python experiments/ppo.py --history-len 1 --convergence-mode delta \
         --convergence-patience 100 --delta-convergence-threshold 0.01 --total-timesteps 2000000
 
@@ -45,6 +45,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
+from scipy.optimize import root
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -318,6 +319,7 @@ def compute_competitive_benchmark(env: ElectricityMarketEnv):
         "lmps": lmps.tolist(),
         "gens": [float(g) for g in g_vals],
         "total_gen": float(sum(g_vals)),
+        "total_profit": float(sum(profits.values())),
         "profits": {str(k): float(v) for k, v in profits.items()},
     }
 
@@ -381,15 +383,141 @@ def compute_monopoly_benchmark(env: ElectricityMarketEnv):
     }
 
 
-def compute_delta(avg_step_profit: float, pi_c: float, pi_m: float) -> float:
-    """Calvano normalized profit gain: 0 = competitive, 1 = full collusion."""
-    denom = pi_m - pi_c
+def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
+    """
+    Nash–Cournot equilibrium: stacked KKT MCP (same as model.mod / NEOS PATH).
+
+    Firm stationarity + capacity complementarity; ISO dispatch equalities;
+    transmission complementarity. Matches AMPL formulation in repo root.
+    """
+    from iso_market.node_network import P0, Q0
+
+    p0 = P0.astype(float)
+    beta = p0 / Q0.astype(float)
+    ptdf = env.ptdf
+    line_limits = env.line_limits
+    plant_node = np.array([PLANTS[i]["node"] for i in range(len(PLANTS))])
+    plant_mc = np.array([PLANTS[i]["mc"] for i in range(len(PLANTS))])
+    plant_qc = np.array([PLANTS[i]["qc"] for i in range(len(PLANTS))])
+    plant_cap = np.array([PLANTS[i]["cap"] for i in range(len(PLANTS))])
+    n_plants = len(PLANTS)
+
+    def gen_per_node(g):
+        gn = np.zeros(NUM_NODES)
+        for p in range(n_plants):
+            gn[plant_node[p]] += g[p]
+        return gn
+
+    def nodal_prices(g, y):
+        return p0 - beta * (gen_per_node(g) + y)
+
+    def fb(a, b):
+        return a + b - np.sqrt(a * a + b * b + 1e-18)
+
+    def unpack(z):
+        return z[0:3], z[3:6], z[6:11], z[11], z[12:17], z[17:22]
+
+    def mcp_residual(z):
+        g, rho, y, mu, lp, lm = unpack(z)
+        p = nodal_prices(g, y)
+        pp = p[plant_node]
+        f_stat = -(pp - beta[plant_node] * g) + (plant_mc + plant_qc * g) + rho
+        f_cap = plant_cap - g
+        f_disp = p - mu - ptdf.T @ (lm - lp)
+        flow = ptdf @ y
+        return np.concatenate([
+            fb(g, f_stat),
+            fb(rho, f_cap),
+            f_disp,
+            np.array([np.sum(y)]),
+            fb(lp, line_limits + flow),
+            fb(lm, line_limits - flow),
+        ])
+
+    best_z, best_res = None, np.inf
+    base = np.concatenate([
+        np.array([100.0, 40.0, 40.0]),
+        np.zeros(3),
+        np.zeros(5),
+        np.array([28.0]),
+        np.zeros(5),
+        np.zeros(5),
+    ])
+    rng = np.random.default_rng(0)
+    for attempt in range(40):
+        z0 = base.copy()
+        if attempt:
+            z0[0:3] = rng.uniform(0, plant_cap)
+            z0[6:11] = rng.uniform(-20, 20, 5)
+            z0[11] = rng.uniform(15, 35)
+        sol = root(mcp_residual, z0, method="hybr", tol=1e-12)
+        res = float(np.max(np.abs(mcp_residual(sol.x))))
+        g = sol.x[0:3]
+        if np.all(g >= -1e-6) and np.all(g <= plant_cap + 1e-6) and res < best_res:
+            best_res, best_z = res, sol.x.copy()
+        if best_res < 1e-9:
+            break
+
+    if best_z is None:
+        raise RuntimeError("Cournot–Nash MCP failed to converge.")
+
+    g, _, y, _, _, _ = unpack(best_z)
+    g = np.clip(g, 0.0, plant_cap)
+    lmps = nodal_prices(g, y)
+    demand = gen_per_node(g) + y
+    avg_lmp = float(np.sum(lmps * demand) / np.sum(demand))
+    g_vals = [float(v) for v in g]
+
+    profits = {}
+    for fid in range(NUM_FIRMS):
+        p = 0.0
+        for pidx in FIRM_PLANT_IDX[fid]:
+            plant = PLANTS[pidx]
+            gv = g_vals[pidx]
+            p += (
+                lmps[plant["node"]] * gv
+                - plant["mc"] * gv
+                - 0.5 * plant["qc"] * gv ** 2
+            )
+        profits[fid] = p
+
+    return {
+        "avg_lmp": avg_lmp,
+        "lmps": lmps.tolist(),
+        "gens": g_vals,
+        "total_gen": float(sum(g_vals)),
+        "total_profit": float(sum(profits.values())),
+        "profits": {str(k): float(v) for k, v in profits.items()},
+        "mcp_max_residual": best_res,
+    }
+
+
+def _benchmark_profits_by_firm(benchmarks: dict, key: str) -> dict:
+    """Map firm id → profit ($/step) from a benchmark dict."""
+    return {
+        fid: float(benchmarks[key]["profits"][str(fid)])
+        for fid in range(NUM_FIRMS)
+    }
+
+
+def compute_combined_delta(
+    avg_step_profits: dict,
+    pi_nash: dict,
+    pi_mono: dict,
+) -> float:
+    """
+    Market-wide collusion index:
+      Δ_comb = Σ_f (π̄_f − π_f^Nash) / Σ_f (π_f^Mono − π_f^Nash).
+    0 = static Nash; 1 = joint monopoly (on aggregate profit scale).
+    """
+    num = sum(avg_step_profits[fid] - pi_nash[fid] for fid in range(NUM_FIRMS))
+    denom = sum(pi_mono[fid] - pi_nash[fid] for fid in range(NUM_FIRMS))
     if abs(denom) < 1e-8:
         return 0.0
-    return (avg_step_profit - pi_c) / denom
+    return float(num / denom)
 
 
-def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_c, pi_m):
+def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_mono):
     """
     Mean deterministic-policy MW per firm over stored rollout observations (post-update
     actor mean on each row), and Δ from one DC-OPF clear at mean plant outputs.
@@ -420,11 +548,11 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_c, pi_m):
         gen_per_node[plant["node"]] += gen_per_plant[pidx]
 
     lmps, _demand = env._clear_market(gen_per_node)
-    greedy_delta = {}
     if lmps is None:
-        for fid in range(NUM_FIRMS):
-            greedy_delta[fid] = float("nan")
-        return {"greedy_totals": greedy_totals, "greedy_delta": greedy_delta}
+        return {
+            "greedy_totals": greedy_totals,
+            "greedy_delta_combined": float("nan"),
+        }
 
     profits = {}
     for fid in range(NUM_FIRMS):
@@ -435,10 +563,12 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_c, pi_m):
             p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g * g
         profits[fid] = p
 
-    for fid in range(NUM_FIRMS):
-        greedy_delta[fid] = float(compute_delta(profits[fid], pi_c[fid], pi_m[fid]))
-
-    return {"greedy_totals": greedy_totals, "greedy_delta": greedy_delta}
+    return {
+        "greedy_totals": greedy_totals,
+        "greedy_delta_combined": float(
+            compute_combined_delta(profits, pi_nash, pi_mono)
+        ),
+    }
 
 
 def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict_cpu: dict) -> float:
@@ -590,7 +720,7 @@ def _print_paper_vs_ppo_banner():
         "  Here:  Independent PPO, continuous generation, DC-OPF/LMP, γ from --gamma, "
         "early stop = N consecutive PPO updates (--convergence-patience) under "
         "--convergence-mode delta|kl (or none).\n"
-        "  Δ metric: (π−πC)/(πM−πC) per firm — same normalization idea as the paper.\n"
+        "  Δ metric: Σ(π−π^Nash)/Σ(π^Mono−π^Nash) combined — Nash floor, monopoly ceiling.\n"
         + "=" * 66
     )
 
@@ -605,7 +735,7 @@ def _print_session_convergence_banner(args, session_id: int):
         f"  delta_convergence_threshold={args.delta_convergence_threshold}\n"
         f"  kl_threshold={args.kl_threshold}  policy_kl_lag={args.policy_kl_lag}\n"
         "  streak counts consecutive PPO updates satisfying the *active* mode only "
-        "(delta: max_f|Δ_f−Δ_prev|; kl: max_f KL per --policy-kl-lag). "
+        "(delta: |Δ_comb−Δ_comb,prev|; kl: max_f KL per --policy-kl-lag). "
         "Printed KL is for monitoring in all modes.\n"
         "---\n"
     )
@@ -624,8 +754,7 @@ def _print_progress_line(
     delta_max_jump: float,
     kl_for_convergence: float,
 ):
-    d0 = row.get("firm_0_delta", 0)
-    d1 = row.get("firm_1_delta", 0)
+    d_comb = row.get("delta_combined", float("nan"))
     mk = row.get("max_kl", 0)
     mkl = row.get("max_kl_lag")
     sess_prefix = (
@@ -642,7 +771,7 @@ def _print_progress_line(
         print(
             f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
             f"LMP ${row['avg_lmp']:.2f} | "
-            f"Δ0={d0:.3f} Δ1={d1:.3f} | "
+            f"Δ_comb={d_comb:.3f} | "
             f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
             f"KL={mk:.2e}{kl_extra} streak={stable_count}"
             + (f"  [streak=active:{args.convergence_mode}]" if use_conv else "")
@@ -667,8 +796,7 @@ def _print_progress_line(
         f"upd={update_idx + 1}/{num_updates}",
         f"ep={episode_count}",
         f"LMP={row['avg_lmp']:.2f}",
-        f"d0={d0:.3f}",
-        f"d1={d1:.3f}",
+        f"Δ_comb={d_comb:.3f}" if math.isfinite(d_comb) else "Δ_comb=NA",
         f"g0={row['firm_0_avg_gen']:.1f}",
         f"g1={row['firm_1_avg_gen']:.1f}",
         f"KL_intra_max={mk:.2e}",
@@ -693,8 +821,8 @@ def train_session(env, benchmarks, args, session_id, device):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    pi_c = {fid: benchmarks["competitive"]["profits"][str(fid)] for fid in range(NUM_FIRMS)}
-    pi_m = {fid: benchmarks["monopoly"]["profits"][str(fid)] for fid in range(NUM_FIRMS)}
+    pi_nash = _benchmark_profits_by_firm(benchmarks, "cournot_nash")
+    pi_mono = _benchmark_profits_by_firm(benchmarks, "monopoly")
 
     # Fresh agents
     agents = {}
@@ -721,7 +849,7 @@ def train_session(env, benchmarks, args, session_id, device):
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
     last_agent_kls_lag = {fid: float("nan") for fid in range(NUM_FIRMS)}
     policy_ckpt_hist = {fid: [] for fid in agents}
-    prev_firm_deltas = {fid: None for fid in range(NUM_FIRMS)}
+    prev_delta_combined = None
 
     # Logging
     log_rows = []
@@ -868,22 +996,24 @@ def train_session(env, benchmarks, args, session_id, device):
         else:
             last_kl_for_convergence = float("nan")
 
-        # Realized Δ and jump (logged every mode; streak only in delta mode)
-        deltas_now = {}
+        # Combined Δ and jump (logged every mode; streak only in delta mode)
+        avg_step_profits = {}
         for fid in range(NUM_FIRMS):
             ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
-            avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0.0
-            deltas_now[fid] = compute_delta(avg_step_prof, pi_c[fid], pi_m[fid])
-
-        if all(prev_firm_deltas[f] is not None for f in range(NUM_FIRMS)):
-            last_delta_max_jump = max(
-                abs(deltas_now[f] - prev_firm_deltas[f]) for f in range(NUM_FIRMS)
+            avg_step_profits[fid] = (
+                ep_prof / args.episode_len if args.episode_len > 0 else 0.0
             )
+        delta_combined_now = compute_combined_delta(
+            avg_step_profits, pi_nash, pi_mono
+        )
+
+        if prev_delta_combined is not None:
+            last_delta_max_jump = abs(delta_combined_now - prev_delta_combined)
         else:
             last_delta_max_jump = float("nan")
 
         if use_convergence and conv_delta:
-            if all(prev_firm_deltas[f] is not None for f in range(NUM_FIRMS)):
+            if prev_delta_combined is not None:
                 if last_delta_max_jump < args.delta_convergence_threshold:
                     stable_count += 1
                 else:
@@ -891,35 +1021,35 @@ def train_session(env, benchmarks, args, session_id, device):
                 if stable_count >= args.convergence_patience:
                     converged = True
 
-        for f in range(NUM_FIRMS):
-            prev_firm_deltas[f] = deltas_now[f]
+        prev_delta_combined = delta_combined_now
 
         # ---------- logging ----------
         if (update + 1) % args.log_interval == 0:
             avg_lmp = np.mean(recent_lmps) if recent_lmps else 0
             gr = compute_greedy_metrics_from_obs(
-                env, agents, rollout_obs_backup, pi_c, pi_m
+                env, agents, rollout_obs_backup, pi_nash, pi_mono
             )
             row = {
                 "step": total_steps,
                 "episodes": episode_count,
                 "avg_lmp": float(avg_lmp),
                 "wall_sec": time.time() - wall_start,
+                "delta_combined": float(delta_combined_now),
             }
             for fid in range(NUM_FIRMS):
                 ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0
                 avg_gen = float(np.mean(recent_gens[fid])) if recent_gens[fid] else 0
                 avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0
-                delta = compute_delta(avg_step_prof, pi_c[fid], pi_m[fid])
                 row[f"firm_{fid}_ep_profit"] = ep_prof
+                row[f"firm_{fid}_avg_step_profit"] = float(avg_step_prof)
                 row[f"firm_{fid}_avg_gen"] = avg_gen
-                row[f"firm_{fid}_delta"] = float(delta)
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
                 if args.policy_kl_lag > 0:
                     row[f"firm_{fid}_kl_lag"] = last_agent_kls_lag.get(fid, float("nan"))
                 if gr is not None:
                     row[f"firm_{fid}_greedy_gen"] = gr["greedy_totals"][fid]
-                    row[f"firm_{fid}_greedy_delta"] = gr["greedy_delta"][fid]
+            if gr is not None:
+                row["greedy_delta_combined"] = gr["greedy_delta_combined"]
             row["max_kl"] = max(last_agent_kls.values())
             if args.policy_kl_lag > 0:
                 fin_lag = [
@@ -930,6 +1060,7 @@ def train_session(env, benchmarks, args, session_id, device):
                 row["max_kl_lag"] = max(fin_lag) if fin_lag else float("nan")
             row["kl_streak"] = stable_count
             row["convergence_streak"] = stable_count
+            row["delta_combined_jump"] = float(last_delta_max_jump)
             row["delta_max_jump"] = float(last_delta_max_jump)
             row["kl_for_convergence"] = float(last_kl_for_convergence)
             row["ppo_update"] = update + 1
@@ -971,7 +1102,7 @@ def train_session(env, benchmarks, args, session_id, device):
                     )
             else:
                 msg = (
-                    f"max |Δ−Δ_prev| < {args.delta_convergence_threshold} "
+                    f"|Δ_comb−Δ_comb,prev| < {args.delta_convergence_threshold} "
                     f"for {args.convergence_patience} consecutive updates"
                 )
             print(f"  {sess_prefix}✓ Converged at step {total_steps} ({msg})")
@@ -981,21 +1112,23 @@ def train_session(env, benchmarks, args, session_id, device):
     limit_strat = compute_limit_strategy(agents, obs_normalizers, env, benchmarks)
     deviation_exp = run_deviation_experiment(env, agents, obs_normalizers)
 
-    # Final Δ
-    final_delta = {}
+    final_avg_step = {}
     for fid in range(NUM_FIRMS):
         if recent_profits[fid]:
-            avg_step = float(np.mean(recent_profits[fid])) / args.episode_len
-            final_delta[str(fid)] = compute_delta(avg_step, pi_c[fid], pi_m[fid])
+            final_avg_step[fid] = float(np.mean(recent_profits[fid])) / args.episode_len
         else:
-            final_delta[str(fid)] = 0.0
+            final_avg_step[fid] = 0.0
+    final_delta_combined = compute_combined_delta(
+        final_avg_step, pi_nash, pi_mono
+    )
 
     return {
         "session_id": session_id,
         "seed": seed,
         "converged": converged,
         "convergence_step": total_steps,
-        "final_delta": final_delta,
+        "final_delta_combined": float(final_delta_combined),
+        "final_avg_step_profits": {str(k): float(v) for k, v in final_avg_step.items()},
         "metrics": log_rows,
         "limit_strategy": limit_strat,
         "deviation_experiment": deviation_exp,
@@ -1018,17 +1151,21 @@ def main(args):
     )
 
     # Compute benchmarks
+    print("\n=== Benchmarks (Cournot–Nash MCP may take a few seconds) ===")
     benchmarks = {
         "competitive": compute_competitive_benchmark(env),
+        "cournot_nash": compute_cournot_nash_benchmark(env),
         "monopoly": compute_monopoly_benchmark(env),
     }
 
     comp = benchmarks["competitive"]
+    cn = benchmarks["cournot_nash"]
     mono = benchmarks["monopoly"]
-    print("\n=== Benchmarks ===")
-    print(f"  Competitive:  avg LMP ${comp['avg_lmp']:.2f}  |  F0 π={comp['profits']['0']:.1f}/step  F1 π={comp['profits']['1']:.1f}/step")
-    print(f"  Monopoly:     avg LMP ${mono['avg_lmp']:.2f}  |  F0 π={mono['profits']['0']:.1f}/step  F1 π={mono['profits']['1']:.1f}/step")
-    print(f"  (Δ=0 at competitive, Δ=1 at monopoly)")
+    print(f"  Competitive:    avg LMP ${comp['avg_lmp']:.2f}  |  total π={comp['profits']['0']+comp['profits']['1']:.1f}/step")
+    print(f"  Cournot–Nash:   avg LMP ${cn['avg_lmp']:.2f}  |  total π={cn['total_profit']:.1f}/step  (MCP res {cn['mcp_max_residual']:.2e})")
+    print(f"  Monopoly:       avg LMP ${mono['avg_lmp']:.2f}  |  total π={mono['total_profit']:.1f}/step")
+    denom = mono["total_profit"] - cn["total_profit"]
+    print(f"  Combined Δ: 0 at Nash, 1 at monopoly  (Σπ^Mono−Σπ^Nash = {denom:.1f} $/step)")
     print("=" * 50)
 
     out_dir = Path(args.output_dir)
@@ -1041,7 +1178,7 @@ def main(args):
         json.dump(config, f, indent=2)
 
     # Run sessions
-    all_final_deltas = {str(fid): [] for fid in range(NUM_FIRMS)}
+    all_final_delta_combined = []
     all_convergence_steps = []
 
     for s in range(args.num_sessions):
@@ -1059,7 +1196,8 @@ def main(args):
             "seed": result["seed"],
             "converged": result["converged"],
             "convergence_step": result["convergence_step"],
-            "final_delta": result["final_delta"],
+            "final_delta_combined": result["final_delta_combined"],
+            "final_avg_step_profits": result["final_avg_step_profits"],
             "metrics": result["metrics"],
             "limit_strategy": result["limit_strategy"],
             "deviation_experiment": result["deviation_experiment"],
@@ -1074,14 +1212,15 @@ def main(args):
                 with open(sess_dir / f"normalizer_{fid}.json", "w") as f:
                     json.dump(norm.state_dict(), f)
 
-        for fid in range(NUM_FIRMS):
-            all_final_deltas[str(fid)].append(result["final_delta"][str(fid)])
+        all_final_delta_combined.append(result["final_delta_combined"])
         all_convergence_steps.append(result["convergence_step"])
 
         if args.num_sessions > 1:
-            d0 = result["final_delta"]["0"]
-            d1 = result["final_delta"]["1"]
-            print(f"  Final Δ: F0={d0:.3f}  F1={d1:.3f}  ({'converged' if result['converged'] else 'max steps'})")
+            dc = result["final_delta_combined"]
+            print(
+                f"  Final Δ_combined={dc:.3f}  "
+                f"({'converged' if result['converged'] else 'max steps'})"
+            )
 
     # Aggregate
     aggregate = {
@@ -1089,10 +1228,8 @@ def main(args):
         "convergence_step_mean": float(np.mean(all_convergence_steps)),
         "convergence_step_std": float(np.std(all_convergence_steps)),
     }
-    for fid in range(NUM_FIRMS):
-        vals = all_final_deltas[str(fid)]
-        aggregate[f"firm_{fid}_delta_mean"] = float(np.mean(vals))
-        aggregate[f"firm_{fid}_delta_std"] = float(np.std(vals))
+    aggregate["delta_combined_mean"] = float(np.mean(all_final_delta_combined))
+    aggregate["delta_combined_std"] = float(np.std(all_final_delta_combined))
 
     with open(out_dir / "aggregate.json", "w") as f:
         json.dump(aggregate, f, indent=2)
@@ -1100,10 +1237,10 @@ def main(args):
     print(f"\n{'='*50}")
     print(f"Results → {out_dir}")
     print(f"Sessions: {args.num_sessions}")
-    for fid in range(NUM_FIRMS):
-        m = aggregate[f"firm_{fid}_delta_mean"]
-        s = aggregate[f"firm_{fid}_delta_std"]
-        print(f"  Firm {fid} Δ: {m:.3f} ± {s:.3f}")
+    print(
+        f"  Δ_combined: {aggregate['delta_combined_mean']:.3f} "
+        f"± {aggregate['delta_combined_std']:.3f}"
+    )
     print(f"  Avg convergence: {aggregate['convergence_step_mean']:.0f} ± {aggregate['convergence_step_std']:.0f} steps")
 
 
@@ -1142,7 +1279,7 @@ def parse_args():
         type=str,
         default="delta",
         choices=("delta", "kl", "none"),
-        help="delta: stop when max_f|Δ_f−Δ_prev| < --delta-convergence-threshold for "
+        help="delta: stop when |Δ_comb−Δ_comb,prev| < --delta-convergence-threshold for "
         "--convergence-patience updates. kl: same with policy KL vs --kl-threshold. "
         "none: never early-stop on convergence (run full --total-timesteps; patience ignored).",
     )
@@ -1157,7 +1294,7 @@ def parse_args():
         "--delta-convergence-threshold",
         type=float,
         default=0.01,
-        help="delta mode: convergence requires max_f |Δ_f−Δ_f_prev| < this for patience updates",
+        help="delta mode: |Δ_combined−Δ_combined,prev| < this for patience updates",
     )
     p.add_argument(
         "--kl-threshold",
