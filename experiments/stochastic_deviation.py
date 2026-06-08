@@ -12,7 +12,7 @@ impulse response across many naturally occurring deviation events.
 
 Assumptions
 -----------
-* Trained policies are frozen — both agents act on the Beta policy mean (greedy).
+* Trained policies are frozen — both agents act on actor mean + sigmoid (greedy).
 * Rival learns nothing about the deviation directly: it only observes nodal
   LMPs through the history window (imperfect monitoring).
 * On a deviation step the deviator's MW per plant is set to

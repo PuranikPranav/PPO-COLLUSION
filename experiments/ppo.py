@@ -44,8 +44,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Beta
+from torch.distributions import Normal
 from scipy.optimize import root
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -154,18 +153,19 @@ class RolloutBuffer:
 
 
 # ======================================================================
-# Actor-Critic network (Beta policy on [0, 1] generation fractions)
+# Actor-Critic network (Gaussian policy + sigmoid squashing to [0, cap])
 # ======================================================================
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden: int = 64):
         super().__init__()
-        self.actor_net = nn.Sequential(
+        self.actor_mean = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
-            nn.Linear(hidden, act_dim * 2),
+            nn.Linear(hidden, act_dim),
         )
+        self.actor_log_std = nn.Parameter(torch.zeros(act_dim))
         self.critic = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
@@ -174,16 +174,10 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden, 1),
         )
 
-    def get_alpha_beta(self, obs):
-        raw_out = self.actor_net(obs)
-        alpha_logits, beta_logits = raw_out.chunk(2, dim=-1)
-        alpha = F.softplus(alpha_logits) + 1e-3
-        beta = F.softplus(beta_logits) + 1e-3
-        return alpha, beta
-
     def policy(self, obs):
-        alpha, beta = self.get_alpha_beta(obs)
-        return Beta(alpha, beta)
+        mean = self.actor_mean(obs)
+        std = self.actor_log_std.exp().expand_as(mean)
+        return Normal(mean, std)
 
     def value(self, obs):
         return self.critic(obs).squeeze(-1)
@@ -214,28 +208,30 @@ class PPOAgent:
 
     @torch.no_grad()
     def select_action(self, obs_norm: np.ndarray):
-        """Sample stochastic action. Returns (fraction, scaled_MW, log_prob, value)."""
+        """Sample stochastic action. Returns (raw, scaled_MW, log_prob, value)."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         dist = self.ac.policy(obs_t)
-        raw_fraction = dist.sample().squeeze(0)
-        safe_fraction = torch.clamp(raw_fraction, 1e-5, 1.0 - 1e-5)
-        log_prob = dist.log_prob(safe_fraction).sum().item()
+        raw = dist.sample().squeeze(0)
+        log_prob = dist.log_prob(raw).sum().item()
         value = self.ac.value(obs_t).item()
-        frac_np = safe_fraction.cpu().numpy()
-        return frac_np, frac_np * self.caps, log_prob, value
+        raw_np = raw.cpu().numpy()
+        return raw_np, self._to_mw(raw_np), log_prob, value
 
     @torch.no_grad()
     def deterministic_action(self, obs_norm: np.ndarray) -> np.ndarray:
-        """Greedy mean of Beta policy, scaled to MW."""
+        """Greedy actor mean passed through sigmoid, scaled to MW."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
-        alpha, beta = self.ac.get_alpha_beta(obs_t)
-        mean_fraction = (alpha / (alpha + beta)).squeeze(0).cpu().numpy()
-        return mean_fraction * self.caps
+        raw = self.ac.actor_mean(obs_t).squeeze(0).cpu().numpy()
+        return self._to_mw(raw)
 
     @torch.no_grad()
     def get_value(self, obs_norm: np.ndarray) -> float:
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         return self.ac.value(obs_t).item()
+
+    def _to_mw(self, raw: np.ndarray) -> np.ndarray:
+        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
+        return frac * self.caps
 
     def update(self, last_val, gamma, gae_lambda, clip_eps, epochs,
                minibatch_size, ent_coef, vf_coef, max_grad_norm):
@@ -526,7 +522,7 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     Mean deterministic-policy MW per firm over stored rollout observations (post-update
     actor mean on each row), and Δ from one DC-OPF clear at mean plant outputs.
     obs_by_firm[fid] is (T, obs_dim) numpy — typically a copy of the buffer before .clear().
-    Actions in the buffer are generation fractions in [0, 1] (Beta samples, clamped).
+    Actions in the buffer are pre-squash Gaussian samples (log_prob under Normal).
     """
     if not obs_by_firm:
         return None
@@ -540,9 +536,9 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
         obs_np = obs_by_firm[fid]
         obs = torch.from_numpy(obs_np.astype(np.float32)).to(agent.device)
         with torch.no_grad():
-            alpha, beta = agent.ac.get_alpha_beta(obs)
-            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
-        mw = mean_fraction * agent.caps
+            raw = agent.ac.actor_mean(obs).cpu().numpy()
+        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
+        mw = frac * agent.caps
         greedy_totals[fid] = float(np.mean(mw.sum(axis=1)))
         mean_mw = np.mean(mw, axis=0)
         for j, pidx in enumerate(FIRM_PLANT_IDX[fid]):
@@ -591,14 +587,14 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
         agent.ac.load_state_dict(old_sd_dev)
         with torch.no_grad():
             old_dist = agent.ac.policy(obs_buf)
-            old_alpha = old_dist.concentration1.clone()
-            old_beta = old_dist.concentration0.clone()
+            old_mean = old_dist.loc.clone()
+            old_std = old_dist.scale.clone()
     finally:
         agent.ac.load_state_dict(current_sd)
 
     with torch.no_grad():
         new_dist = agent.ac.policy(obs_buf)
-    old_fixed = Beta(old_alpha, old_beta)
+    old_fixed = Normal(old_mean, old_std)
     kl = torch.distributions.kl_divergence(old_fixed, new_dist)
     return float(kl.sum(dim=-1).mean().item())
 
@@ -637,9 +633,9 @@ def evaluate_deterministic(agents, obs_normalizers, ref_obs):
         normed = np.array([obs_normalizers[fid].normalize(o) for o in ref_obs])
         obs_t = torch.from_numpy(normed).to(agent.device)
         with torch.no_grad():
-            alpha, beta = agent.ac.get_alpha_beta(obs_t)
-            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
-        result[fid] = mean_fraction * agent.caps
+            raw = agent.ac.actor_mean(obs_t).cpu().numpy()
+        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
+        result[fid] = frac * agent.caps
     return result
 
 
@@ -928,8 +924,8 @@ def train_session(env, benchmarks, args, session_id, device):
                 old_dist = agent.ac.policy(obs_buf)
                 old_policy_snapshots[fid] = {
                     "obs": obs_buf,
-                    "alpha": old_dist.concentration1.clone(),
-                    "beta": old_dist.concentration0.clone(),
+                    "mean": old_dist.loc.clone(),
+                    "std": old_dist.scale.clone(),
                 }
 
         # Rollout obs for greedy metrics (post-update policy mean on same states)
@@ -954,7 +950,7 @@ def train_session(env, benchmarks, args, session_id, device):
             with torch.no_grad():
                 snap = old_policy_snapshots[fid]
                 new_dist = agents[fid].ac.policy(snap["obs"])
-                old_dist = Beta(snap["alpha"], snap["beta"])
+                old_dist = Normal(snap["mean"], snap["std"])
                 kl = torch.distributions.kl_divergence(old_dist, new_dist)
                 last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
