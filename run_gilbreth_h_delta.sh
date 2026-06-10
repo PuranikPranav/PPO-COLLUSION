@@ -20,7 +20,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --time=4-00:00:00
+#SBATCH --time=8-00:00:00
 #SBATCH --mem=50G
 #SBATCH --output=slurm-h-delta-%j.out
 #SBATCH --error=slurm-h-delta-%j.err
@@ -57,7 +57,7 @@ FIGURES_ROOT="figures/delta_cont"
 SESSIONS=100
 TIMESTEPS=2000000
 PATIENCE=100
-DELTA_CONV_THRESH=0.01
+DELTA_CONV_THRESH="${DELTA_CONV_THRESH:-0.01}"
 EPISODE_LEN=168
 LOG_FORMAT=structured
 
@@ -65,7 +65,8 @@ mkdir -p "$FIGURES_ROOT"
 
 echo "####################################################################"
 echo "#  history_len=${H}  (obs_dim=${OBS_DIM} = ${H} × ${OBS_PER_STEP})"
-echo "#  convergence=${MODE}  continuing task (without-episodes)"
+echo "#  convergence=${MODE}  |Δ_comb−Δ_comb,prev| threshold=${DELTA_CONV_THRESH}"
+echo "#  continuing task (without-episodes)"
 echo "#  GPU: ${CUDA_VISIBLE_DEVICES:-(Slurm-assigned)}  job=${SLURM_JOB_ID:-local}"
 echo "#  results → ${RESULTS_ROOT}/h${H}"
 echo "####################################################################"

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Submit H=3 and H=5 training in parallel (one GPU each on liu334 / a100-40gb).
 #
+# Defaults for this launcher:
+#   --delta-convergence-threshold 0.005  (stricter than H=1's 0.01)
+#   --time 8 days
+#
 # On Gilbreth login node:
 #   cd ~/ppo-collusion
 #   git fetch origin && git checkout without-episodes && git pull
@@ -19,6 +23,9 @@ if [[ ! -f "$SCRIPT" ]]; then
   exit 1
 fi
 
+export DELTA_CONV_THRESH="${DELTA_CONV_THRESH:-0.005}"
+SLURM_TIME="${SLURM_TIME:-8-00:00:00}"
+
 submit_h() {
   local h="$1"
   sbatch \
@@ -28,13 +35,16 @@ submit_h() {
     --gres=gpu:1 \
     --cpus-per-task=8 \
     --mem=50G \
-    --time=4-00:00:00 \
+    --time="$SLURM_TIME" \
     --output="slurm-h${h}-delta-%j.out" \
     --error="slurm-h${h}-delta-%j.err" \
     "$SCRIPT" "$h"
 }
 
-echo "Submitting two jobs (1 GPU each): history_len=3 (obs_dim=45), history_len=5 (obs_dim=75)"
+echo "Submitting H=3 and H=5 (1 GPU each)"
+echo "  obs_dim: 45 (H=3), 75 (H=5)"
+echo "  delta_convergence_threshold=${DELTA_CONV_THRESH}"
+echo "  time_limit=${SLURM_TIME}"
 J3=$(submit_h 3)
 J5=$(submit_h 5)
 echo "$J3"
