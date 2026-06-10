@@ -29,7 +29,7 @@ Outputs (per session, under --output-dir)
 * summary.json      — aggregated statistics (events per firm, mean impact, …)
 
 Default output dir: ``latest_results/deviation_experiment/stochastic_deviation/``
-(for cluster mirrors under ``results/…``, defaults to ``figures/<subpath>/stochastic_deviation/``).
+(for runs under ``old_results/`` or ``results/``, defaults to ``<root>/figures/<subpath>/stochastic_deviation/``).
 
 CLI
 ---
@@ -496,7 +496,7 @@ def parse_args():
         "--run-dir",
         type=Path,
         default=None,
-        help=f"Training run dir (default: {DEFAULT_RUN_DIR_NAME}/; aliases: h1, results/delta_cont/h1)",
+        help=f"Training run dir (default: {DEFAULT_RUN_DIR_NAME}/; aliases: h1, results/delta_cont/h1, figures/h1)",
     )
     p.add_argument("--sessions", type=str, default="0",
                    help='Comma-separated session ids, or "all". Default: "0"')
@@ -527,7 +527,7 @@ def parse_args():
         type=Path,
         default=None,
         help=f"Default: {DEFAULT_RUN_DIR_NAME}/deviation_experiment/stochastic_deviation/ "
-        "or figures/<results subpath>/stochastic_deviation/",
+        "or <old_results|results>/figures/<subpath>/stochastic_deviation/",
     )
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--cuda", action="store_true")

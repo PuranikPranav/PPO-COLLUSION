@@ -18,9 +18,12 @@ Usage
 -----
     python experiments/plot_results.py latest_results --save latest_results/figures/
     python experiments/plot_results.py latest_results --save latest_results/figures/ --calvano-paper
-    python experiments/plot_results.py --compare results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
-    python experiments/plot_results.py --compare-calvano results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
-    python experiments/plot_results.py --compare-generation-profit results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
+    python experiments/plot_results.py --compare \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
+    python experiments/plot_results.py --compare-calvano \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
 """
 
 import argparse

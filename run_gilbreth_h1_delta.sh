@@ -6,7 +6,7 @@
 #   git fetch origin && git checkout without-episodes && git pull
 #   sbatch run_gilbreth_h1_delta.sh
 #
-# Outputs:
+# Outputs (cluster paths; rsync maps h1 → latest_results/, figures → latest_results/figures/):
 #   results/delta_cont/h1/
 #   figures/delta_cont/
 #

@@ -1,19 +1,28 @@
-"""Canonical repo paths for training runs and deviation-experiment figures."""
+"""Canonical repo paths for training runs, figures, and archived results."""
 from __future__ import annotations
 
 from pathlib import Path
 
-# Training run: sessions/, config.json, aggregate.json, *.pt checkpoints
+# Primary local run: sessions/, config.json, aggregate.json, deviation_experiment/
 DEFAULT_RUN_DIR_NAME = "latest_results"
 
-# Plots from plot_calvano_proof, impulse_response, plot_top4_cartels, etc.
-DEVIATION_EXPERIMENT_DIR_NAME = "deviation_experiment"
+# Archived cross-history runs (local only; was results/delta_crosshistory)
+OLD_RESULTS_ROOT_NAME = "old_results"
+ARCHIVE_CROSSHISTORY_DIR_NAME = "delta_crosshistory"
 
-# CLI aliases for renamed folders (local layout vs cluster mirror)
+# Gilbreth cluster output roots (optional local mirror under results/ after rsync)
+CLUSTER_RESULTS_ROOT_NAME = "results/delta_cont"
+
+# Subdirs under a run directory
+DEVIATION_EXPERIMENT_DIR_NAME = "deviation_experiment"
+TRAINING_FIGURES_DIR_NAME = "figures"
+
+# CLI aliases → DEFAULT_RUN_DIR_NAME
 _RUN_DIR_ALIASES = {
     "h1": DEFAULT_RUN_DIR_NAME,
     "results/delta_cont/h1": DEFAULT_RUN_DIR_NAME,
     "results/delta/h1": DEFAULT_RUN_DIR_NAME,
+    "figures/h1": DEFAULT_RUN_DIR_NAME,  # legacy plot folder name
 }
 
 
@@ -50,18 +59,35 @@ def resolve_run_dir(run_dir: Path | str | None = None) -> Path:
     return p
 
 
-def deviation_figures_dir(run_dir: Path | str) -> Path:
-    """Output directory for Calvano / static-BR impulse plots."""
+def archive_crosshistory_dir() -> Path:
+    """``old_results/delta_crosshistory`` (H=1,2,3 episodic cross-history archive)."""
+    return repo_root() / OLD_RESULTS_ROOT_NAME / ARCHIVE_CROSSHISTORY_DIR_NAME
+
+
+def archive_crosshistory_run(h: int | str) -> Path:
+    return archive_crosshistory_dir() / f"h{h}"
+
+
+def training_figures_dir(run_dir: Path | str | None = None) -> Path:
+    """Training convergence / Calvano paper plots for a run."""
+    return resolve_run_dir(run_dir) / TRAINING_FIGURES_DIR_NAME
+
+
+def deviation_figures_dir(run_dir: Path | str | None = None) -> Path:
+    """Calvano / static-BR impulse plots."""
     return resolve_run_dir(run_dir) / DEVIATION_EXPERIMENT_DIR_NAME
 
 
-def stochastic_deviation_output_dir(run_dir: Path | str) -> Path:
+def stochastic_deviation_output_dir(run_dir: Path | str | None = None) -> Path:
     """Default output for ``stochastic_deviation.py`` rollouts."""
     resolved = resolve_run_dir(run_dir)
     if resolved.name == DEFAULT_RUN_DIR_NAME:
-        return resolved / DEVIATION_EXPERIMENT_DIR_NAME / "stochastic_deviation"
-    try:
-        rel = resolved.relative_to(repo_root() / "results")
-        return repo_root() / "figures" / rel / "stochastic_deviation"
-    except ValueError:
-        return resolved / "stochastic_deviation"
+        return deviation_figures_dir(resolved) / "stochastic_deviation"
+    root = repo_root()
+    for base in (root / OLD_RESULTS_ROOT_NAME, root / "results"):
+        try:
+            rel = resolved.relative_to(base)
+            return base / "figures" / rel / "stochastic_deviation"
+        except ValueError:
+            continue
+    return resolved / "stochastic_deviation"
