@@ -5,6 +5,7 @@ latest_results/
 *.pt
 slurm-*.out
 slurm-*.err
+latest.out
 
 # Local installers (GitHub file-size limit)
 Miniconda*.sh
