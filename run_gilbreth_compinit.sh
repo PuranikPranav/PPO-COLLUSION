@@ -60,7 +60,7 @@ else
     source "$ENV_DIR/bin/activate"
 fi
 
-# ── Experiment parameters (must match results/delta/h*/config.json) ───
+# ── Experiment parameters (must match latest_results/config.json or cluster h*/config.json) ───
 SESSIONS=100
 TIMESTEPS=2000000
 PATIENCE=100

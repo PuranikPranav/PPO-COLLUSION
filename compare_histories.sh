@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Cross-history plots after training. Run from repo root.
 #
-# Layout from run_gilbreth.sh (delta / kl):
-#   ./compare_histories.sh delta    → results/delta/h{1,2,3} → figures/delta/
-#   ./compare_histories.sh kl       → results/kl/h{1,2,3}    → figures/kl/
-#   ./compare_histories.sh both     → runs delta then kl
+# Primary local H=1 continuing-task run:
+#   ./compare_histories.sh            → latest_results → latest_results/figures/
+#   ./compare_histories.sh latest     → same
 #
-# Legacy flat layout (results/h1, h2, h3):
-#   ./compare_histories.sh
-#   ./compare_histories.sh legacy
+# Archived episodic cross-H runs (old_results/delta_crosshistory/):
+#   ./compare_histories.sh crosshistory → h1,h2,h3 → old_results/figures/crosshistory/
+#
+# Optional: after rsync from Gilbreth recreates results/delta_cont/ locally:
+#   ./compare_histories.sh delta_cont → results/delta_cont/h{1,2,3} → figures/delta_cont/
 set -euo pipefail
 cd "$(dirname "$0")"
 REPO_ROOT="$(pwd)"
@@ -21,7 +22,14 @@ if [ -d "$HOME/envs/ppo-collusion" ]; then
   source "$HOME/envs/ppo-collusion/bin/activate"
 fi
 
-CRIT="${1:-legacy}"
+MODE="${1:-latest}"
+
+run_single() {
+  local out="$1"
+  mkdir -p "$out"
+  python experiments/plot_results.py latest_results --save "$out" --calvano-paper
+  echo "Single-run Calvano figures → ${out}/"
+}
 
 run_compare() {
   local _label="$1"
@@ -40,27 +48,26 @@ run_compare() {
   echo "6-panel dashboard → ${out}/comparison_*.png"
 }
 
-case "$CRIT" in
-  both)
-    "$0" delta
-    "$0" kl
+case "$MODE" in
+  latest|"")
+    run_single "latest_results/figures"
     ;;
-  delta|kl)
-    run_compare "$CRIT" \
-      "results/${CRIT}/h1" \
-      "results/${CRIT}/h2" \
-      "results/${CRIT}/h3" \
-      "figures/${CRIT}"
+  crosshistory|archive)
+    run_compare "$MODE" \
+      "old_results/delta_crosshistory/h1" \
+      "old_results/delta_crosshistory/h2" \
+      "old_results/delta_crosshistory/h3" \
+      "old_results/figures/crosshistory"
     ;;
-  legacy|"")
-    run_compare "legacy" \
-      "results/h1" \
-      "results/h2" \
-      "results/h3" \
-      "figures"
+  delta_cont|delta)
+    run_compare "$MODE" \
+      "results/delta_cont/h1" \
+      "results/delta_cont/h2" \
+      "results/delta_cont/h3" \
+      "figures/delta_cont"
     ;;
   *)
-    echo "Usage: $0 [legacy|delta|kl|both]" >&2
+    echo "Usage: $0 [latest|crosshistory|delta_cont]" >&2
     exit 1
     ;;
 esac

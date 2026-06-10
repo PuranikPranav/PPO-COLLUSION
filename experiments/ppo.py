@@ -44,7 +44,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+import torch.nn.functional as F
+from torch.distributions import Beta
 from scipy.optimize import root
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -153,19 +154,18 @@ class RolloutBuffer:
 
 
 # ======================================================================
-# Actor-Critic network
+# Actor-Critic network (Beta policy on [0, 1] generation fractions)
 # ======================================================================
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden: int = 64):
         super().__init__()
-        self.actor_mean = nn.Sequential(
+        self.actor_net = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
-            nn.Linear(hidden, act_dim),
+            nn.Linear(hidden, act_dim * 2),
         )
-        self.actor_log_std = nn.Parameter(torch.zeros(act_dim))
         self.critic = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
@@ -174,10 +174,16 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden, 1),
         )
 
+    def get_alpha_beta(self, obs):
+        raw_out = self.actor_net(obs)
+        alpha_logits, beta_logits = raw_out.chunk(2, dim=-1)
+        alpha = F.softplus(alpha_logits) + 1e-3
+        beta = F.softplus(beta_logits) + 1e-3
+        return alpha, beta
+
     def policy(self, obs):
-        mean = self.actor_mean(obs)
-        std = self.actor_log_std.exp().expand_as(mean)
-        return Normal(mean, std)
+        alpha, beta = self.get_alpha_beta(obs)
+        return Beta(alpha, beta)
 
     def value(self, obs):
         return self.critic(obs).squeeze(-1)
@@ -208,30 +214,28 @@ class PPOAgent:
 
     @torch.no_grad()
     def select_action(self, obs_norm: np.ndarray):
-        """Sample stochastic action. Returns (raw, scaled_MW, log_prob, value)."""
+        """Sample stochastic action. Returns (fraction, scaled_MW, log_prob, value)."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         dist = self.ac.policy(obs_t)
-        raw = dist.sample().squeeze(0)
-        log_prob = dist.log_prob(raw).sum().item()
+        raw_fraction = dist.sample().squeeze(0)
+        safe_fraction = torch.clamp(raw_fraction, 1e-5, 1.0 - 1e-5)
+        log_prob = dist.log_prob(safe_fraction).sum().item()
         value = self.ac.value(obs_t).item()
-        raw_np = raw.cpu().numpy()
-        return raw_np, self._to_mw(raw_np), log_prob, value
+        frac_np = safe_fraction.cpu().numpy()
+        return frac_np, frac_np * self.caps, log_prob, value
 
     @torch.no_grad()
     def deterministic_action(self, obs_norm: np.ndarray) -> np.ndarray:
-        """Return the greedy (mean) action in MW — no exploration noise."""
+        """Greedy mean of Beta policy, scaled to MW."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
-        raw = self.ac.actor_mean(obs_t).squeeze(0).cpu().numpy()
-        return self._to_mw(raw)
+        alpha, beta = self.ac.get_alpha_beta(obs_t)
+        mean_fraction = (alpha / (alpha + beta)).squeeze(0).cpu().numpy()
+        return mean_fraction * self.caps
 
     @torch.no_grad()
     def get_value(self, obs_norm: np.ndarray) -> float:
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         return self.ac.value(obs_t).item()
-
-    def _to_mw(self, raw: np.ndarray) -> np.ndarray:
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        return frac * self.caps
 
     def update(self, last_val, gamma, gae_lambda, clip_eps, epochs,
                minibatch_size, ent_coef, vf_coef, max_grad_norm):
@@ -522,6 +526,7 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     Mean deterministic-policy MW per firm over stored rollout observations (post-update
     actor mean on each row), and Δ from one DC-OPF clear at mean plant outputs.
     obs_by_firm[fid] is (T, obs_dim) numpy — typically a copy of the buffer before .clear().
+    Actions in the buffer are generation fractions in [0, 1] (Beta samples, clamped).
     """
     if not obs_by_firm:
         return None
@@ -535,9 +540,9 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
         obs_np = obs_by_firm[fid]
         obs = torch.from_numpy(obs_np.astype(np.float32)).to(agent.device)
         with torch.no_grad():
-            raw = agent.ac.actor_mean(obs).cpu().numpy()
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        mw = frac * agent.caps
+            alpha, beta = agent.ac.get_alpha_beta(obs)
+            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
+        mw = mean_fraction * agent.caps
         greedy_totals[fid] = float(np.mean(mw.sum(axis=1)))
         mean_mw = np.mean(mw, axis=0)
         for j, pidx in enumerate(FIRM_PLANT_IDX[fid]):
@@ -547,7 +552,7 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     for pidx, plant in enumerate(PLANTS):
         gen_per_node[plant["node"]] += gen_per_plant[pidx]
 
-    lmps, _demand = env._clear_market(gen_per_node)
+    lmps, _demand, _flows, _shadow = env._clear_market(gen_per_node)
     if lmps is None:
         return {
             "greedy_totals": greedy_totals,
@@ -586,14 +591,14 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
         agent.ac.load_state_dict(old_sd_dev)
         with torch.no_grad():
             old_dist = agent.ac.policy(obs_buf)
-            old_mean = old_dist.loc.clone()
-            old_std = old_dist.scale.clone()
+            old_alpha = old_dist.concentration1.clone()
+            old_beta = old_dist.concentration0.clone()
     finally:
         agent.ac.load_state_dict(current_sd)
 
     with torch.no_grad():
         new_dist = agent.ac.policy(obs_buf)
-    old_fixed = Normal(old_mean, old_std)
+    old_fixed = Beta(old_alpha, old_beta)
     kl = torch.distributions.kl_divergence(old_fixed, new_dist)
     return float(kl.sum(dim=-1).mean().item())
 
@@ -601,16 +606,27 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
 # ======================================================================
 # Post-training analysis
 # ======================================================================
+def _obs_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
+    """Build one per-step obs vector; scale LMPs, keep competitive flows/shadows."""
+    base = env._baseline_obs_vector.astype(np.float64)
+    comp_lmps = base[:NUM_NODES]
+    tail = base[NUM_NODES:]
+    comp_avg = float(np.mean(comp_lmps))
+    if comp_avg > 0:
+        scaled_lmps = comp_lmps * (target_avg_lmp / comp_avg)
+    else:
+        scaled_lmps = np.full(NUM_NODES, target_avg_lmp, dtype=np.float64)
+    return np.concatenate([scaled_lmps, tail])
+
+
 def build_reference_obs(env, benchmarks, num_points=20):
-    """Grid of observations spanning plausible LMP range (limit-strategy sweep)."""
-    comp_lmps = np.array(benchmarks["competitive"]["lmps"])
-    comp_avg = np.mean(comp_lmps)
+    """Grid of observations spanning plausible average LMP (limit-strategy sweep)."""
+    comp_avg = float(np.mean(env._baseline_obs_vector[:NUM_NODES]))
     targets = np.linspace(15, 38, num_points)
     ref_obs = []
     for target in targets:
-        scaled = comp_lmps * (target / comp_avg) if comp_avg > 0 else np.full(NUM_NODES, target)
-        obs = np.tile(scaled, env.history_len).astype(np.float32)
-        ref_obs.append(obs)
+        obs_vec = _obs_vector_with_scaled_lmps(env, target)
+        ref_obs.append(np.tile(obs_vec, env.history_len).astype(np.float32))
     return np.array(ref_obs)
 
 
@@ -621,22 +637,21 @@ def evaluate_deterministic(agents, obs_normalizers, ref_obs):
         normed = np.array([obs_normalizers[fid].normalize(o) for o in ref_obs])
         obs_t = torch.from_numpy(normed).to(agent.device)
         with torch.no_grad():
-            raw = agent.ac.actor_mean(obs_t).cpu().numpy()
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        result[fid] = frac * agent.caps
+            alpha, beta = agent.ac.get_alpha_beta(obs_t)
+            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
+        result[fid] = mean_fraction * agent.caps
     return result
 
 
 def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=50):
     """Evaluate the converged deterministic policy across a range of LMP levels."""
-    comp_lmps = np.array(benchmarks["competitive"]["lmps"])
-    comp_avg = np.mean(comp_lmps)
     lmp_grid = np.linspace(15, 38, num_points)
 
     strategies = {str(fid): [] for fid in range(NUM_FIRMS)}
     for target in lmp_grid:
-        scaled = comp_lmps * (target / comp_avg)
-        obs = np.tile(scaled, env.history_len).astype(np.float32)
+        obs = np.tile(
+            _obs_vector_with_scaled_lmps(env, target), env.history_len
+        ).astype(np.float32)
         for fid, agent in agents.items():
             obs_norm = obs_normalizers[fid].normalize(obs)
             gen_mw = agent.deterministic_action(obs_norm)
@@ -662,9 +677,7 @@ def run_deviation_experiment(env, agents, obs_normalizers,
             for fid, agent in agents.items():
                 obs_norm = obs_normalizers[fid].normalize(obs[fid])
                 actions[fid] = agent.deterministic_action(obs_norm)
-            obs, _, done, _ = env.step(actions)
-            if done:
-                obs = env.reset()
+            obs, _, _done, _ = env.step(actions)
 
         # Record resting generation
         resting = {}
@@ -686,14 +699,14 @@ def run_deviation_experiment(env, agents, obs_normalizers,
         actions[deviating_fid] = deviated
 
         obs, _, done, info = env.step(actions)
+        if done and info.get("error"):
+            obs = env.reset()
         for fid in range(NUM_FIRMS):
             trace_gen[str(fid)].append(float(np.sum(actions[fid])))
         trace_lmp.append(info.get("avg_lmp", 0))
 
         # --- Post-deviation: both play deterministic ---
         for _ in range(horizon):
-            if done:
-                obs = env.reset()
             actions = {}
             for fid, agent in agents.items():
                 obs_norm = obs_normalizers[fid].normalize(obs[fid])
@@ -855,12 +868,12 @@ def train_session(env, benchmarks, args, session_id, device):
     log_rows = []
     obs = env.reset()
     total_steps = 0
-    ep_rewards = {f: 0.0 for f in range(NUM_FIRMS)}
     episode_count = 0
     converged = False
 
+    smoothing_steps = 200 * args.episode_len if args.episode_len > 0 else 33600
     recent_lmps = deque(maxlen=2000)
-    recent_profits = {f: deque(maxlen=200) for f in range(NUM_FIRMS)}
+    recent_step_profits = {f: deque(maxlen=smoothing_steps) for f in range(NUM_FIRMS)}
     recent_gens = {f: deque(maxlen=2000) for f in range(NUM_FIRMS)}
 
     num_updates = args.total_timesteps // args.rollout_len
@@ -886,7 +899,7 @@ def train_session(env, benchmarks, args, session_id, device):
             for fid, agent in agents.items():
                 o, a, lp, v = pending[fid]
                 agent.buffer.store(o, a, lp, rewards[fid], v, done)
-                ep_rewards[fid] += rewards[fid]
+                recent_step_profits[fid].append(rewards[fid])
 
             if "lmps" in info:
                 recent_lmps.append(info["avg_lmp"])
@@ -899,11 +912,10 @@ def train_session(env, benchmarks, args, session_id, device):
             obs = obs_next
             total_steps += 1
 
-            if done:
-                for fid in range(NUM_FIRMS):
-                    recent_profits[fid].append(ep_rewards[fid])
-                    ep_rewards[fid] = 0.0
+            if args.episode_len > 0 and total_steps % args.episode_len == 0:
                 episode_count += 1
+
+            if done:
                 obs = env.reset()
 
         # ---------- snapshot policies before update (KL metrics + optional convergence) ----------
@@ -916,8 +928,8 @@ def train_session(env, benchmarks, args, session_id, device):
                 old_dist = agent.ac.policy(obs_buf)
                 old_policy_snapshots[fid] = {
                     "obs": obs_buf,
-                    "mean": old_dist.loc.clone(),
-                    "std": old_dist.scale.clone(),
+                    "alpha": old_dist.concentration1.clone(),
+                    "beta": old_dist.concentration0.clone(),
                 }
 
         # Rollout obs for greedy metrics (post-update policy mean on same states)
@@ -942,7 +954,7 @@ def train_session(env, benchmarks, args, session_id, device):
             with torch.no_grad():
                 snap = old_policy_snapshots[fid]
                 new_dist = agents[fid].ac.policy(snap["obs"])
-                old_dist = Normal(snap["mean"], snap["std"])
+                old_dist = Beta(snap["alpha"], snap["beta"])
                 kl = torch.distributions.kl_divergence(old_dist, new_dist)
                 last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
@@ -999,9 +1011,10 @@ def train_session(env, benchmarks, args, session_id, device):
         # Combined Δ and jump (logged every mode; streak only in delta mode)
         avg_step_profits = {}
         for fid in range(NUM_FIRMS):
-            ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
             avg_step_profits[fid] = (
-                ep_prof / args.episode_len if args.episode_len > 0 else 0.0
+                float(np.mean(recent_step_profits[fid]))
+                if recent_step_profits[fid]
+                else 0.0
             )
         delta_combined_now = compute_combined_delta(
             avg_step_profits, pi_nash, pi_mono
@@ -1037,11 +1050,15 @@ def train_session(env, benchmarks, args, session_id, device):
                 "delta_combined": float(delta_combined_now),
             }
             for fid in range(NUM_FIRMS):
-                ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0
-                avg_gen = float(np.mean(recent_gens[fid])) if recent_gens[fid] else 0
-                avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0
-                row[f"firm_{fid}_ep_profit"] = ep_prof
-                row[f"firm_{fid}_avg_step_profit"] = float(avg_step_prof)
+                avg_step_prof = (
+                    float(np.mean(recent_step_profits[fid]))
+                    if recent_step_profits[fid]
+                    else 0.0
+                )
+                avg_gen = float(np.mean(recent_gens[fid])) if recent_gens[fid] else 0.0
+                mock_ep_prof = avg_step_prof * args.episode_len
+                row[f"firm_{fid}_ep_profit"] = mock_ep_prof
+                row[f"firm_{fid}_avg_step_profit"] = avg_step_prof
                 row[f"firm_{fid}_avg_gen"] = avg_gen
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
                 if args.policy_kl_lag > 0:
@@ -1114,8 +1131,8 @@ def train_session(env, benchmarks, args, session_id, device):
 
     final_avg_step = {}
     for fid in range(NUM_FIRMS):
-        if recent_profits[fid]:
-            final_avg_step[fid] = float(np.mean(recent_profits[fid])) / args.episode_len
+        if recent_step_profits[fid]:
+            final_avg_step[fid] = float(np.mean(recent_step_profits[fid]))
         else:
             final_avg_step[fid] = 0.0
     final_delta_combined = compute_combined_delta(

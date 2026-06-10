@@ -16,11 +16,14 @@ Cross-history comparison:
 
 Usage
 -----
-    python experiments/plot_results.py results/h1 --save figures/
-    python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
-    python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-generation-profit results/h1 results/h2 results/h3 --save figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/ --calvano-paper
+    python experiments/plot_results.py --compare \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
+    python experiments/plot_results.py --compare-calvano \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
 """
 
 import argparse
