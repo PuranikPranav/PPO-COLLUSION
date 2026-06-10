@@ -25,11 +25,15 @@ fi
 
 echo "Syncing from ${REMOTE}:${REMOTE_DIR}/ → ${REPO_ROOT}/"
 
-mkdir -p results figures
+mkdir -p results figures latest_results
 
 "${RSYNC[@]}" \
     "${REMOTE}:${REMOTE_DIR}/results/delta_cont/" \
     "${REPO_ROOT}/results/delta_cont/"
+
+"${RSYNC[@]}" \
+    "${REMOTE}:${REMOTE_DIR}/results/delta_cont/h1/" \
+    "${REPO_ROOT}/latest_results/"
 
 "${RSYNC[@]}" \
     "${REMOTE}:${REMOTE_DIR}/figures/delta_cont/" \
@@ -43,7 +47,9 @@ if $SYNC_ALL; then
         "${REMOTE}:${REMOTE_DIR}/" \
         "${REPO_ROOT}/"
 fi
-
 echo "Done. Local paths:"
-echo "  results/delta_cont/h1/"
+echo "  latest_results/              (primary H=1 run — sessions, config)"
+echo "  latest_results/deviation_experiment/  (Calvano / impulse plots)"
+echo "  results/delta_cont/h1/       (cluster mirror)"
 echo "  figures/delta_cont/"
+

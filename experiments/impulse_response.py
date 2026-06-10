@@ -20,7 +20,7 @@ Calvano Fig. 4 plot (Cournot / LMP mapping)
   Nondeviator (Firm 0)  : long-run nodal LMP at t ≤ 0 (strategy unchanged at cheat),
                           then actual nodal LMP from t ≥ 1 (market reaction / punishment)
 
-Usage: python experiments/impulse_response.py --run-dir h1
+Usage: python experiments/impulse_response.py --run-dir latest_results
 """
 import argparse
 import json
@@ -38,6 +38,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(_mpl_cache_dir))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from iso_market.market_env import ElectricityMarketEnv, NUM_FIRMS, FIRM_PLANT_IDX, PLANTS
+from experiments.paths import DEFAULT_RUN_DIR_NAME, deviation_figures_dir, resolve_run_dir
 from experiments.stochastic_deviation import load_session_agents, load_or_warm_normalizers
 
 DEVIATOR_FID = 1
@@ -275,7 +276,12 @@ def plot_fig4(traces, benchmarks, *, deviation_mode, deviation_frac, case_counts
 
 def main():
     parser = argparse.ArgumentParser(description="Calvano Fig.4 — F1 deviation, F0 response")
-    parser.add_argument("--run-dir", type=Path, default=Path("h1"))
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help=f"Training run directory (default: {DEFAULT_RUN_DIR_NAME}/)",
+    )
     parser.add_argument(
         "--deviation-mode",
         choices=("cap", "frac", "static_br"),
@@ -289,8 +295,11 @@ def main():
     parser.add_argument("--save", type=Path, default=None)
     parser.add_argument("--max-sessions", type=int, default=None)
     args = parser.parse_args()
+    run_dir = resolve_run_dir(args.run_dir)
+    fig_dir = deviation_figures_dir(run_dir)
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
-    sessions_root = args.run_dir / "sessions"
+    sessions_root = run_dir / "sessions"
     session_dirs = sorted(
         d for d in sessions_root.iterdir()
         if d.is_dir() and (d / "agent_0.pt").exists()
@@ -298,7 +307,7 @@ def main():
     if args.max_sessions:
         session_dirs = session_dirs[: args.max_sessions]
 
-    config = json.loads((args.run_dir / "config.json").read_text()) if (args.run_dir / "config.json").exists() else {}
+    config = json.loads((run_dir / "config.json").read_text()) if (run_dir / "config.json").exists() else {}
     benchmarks = config.get("benchmarks", {})
 
     traces = []
@@ -323,7 +332,7 @@ def main():
         traces.append(tr)
         case_counts[classify_firm0(tr)] += 1
 
-    out = args.save or (args.run_dir / "calvano_fig4_f1_deviation.png")
+    out = args.save or (fig_dir / "calvano_fig4_f1_deviation.png")
     plot_fig4(
         traces, benchmarks,
         deviation_mode=args.deviation_mode,
@@ -331,7 +340,7 @@ def main():
         case_counts=case_counts,
         save_path=out,
     )
-    legacy = args.run_dir / "clean_lmp_impulse.png"
+    legacy = fig_dir / "clean_lmp_impulse.png"
     if out != legacy:
         plot_fig4(
             traces, benchmarks,

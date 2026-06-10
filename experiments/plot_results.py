@@ -16,11 +16,11 @@ Cross-history comparison:
 
 Usage
 -----
-    python experiments/plot_results.py results/h1 --save figures/
-    python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
-    python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-generation-profit results/h1 results/h2 results/h3 --save figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/ --calvano-paper
+    python experiments/plot_results.py --compare results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
+    python experiments/plot_results.py --compare-calvano results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
+    python experiments/plot_results.py --compare-generation-profit results/delta_cont/h1 results/delta_cont/h2 results/delta_cont/h3 --save figures/delta_cont/
 """
 
 import argparse

@@ -214,7 +214,7 @@ Firm 1 profit/step = 28.003·29.957 − 18·29.957 − ½·0.01·29.957²
 total            ≈ 2283.1   $/step       (matches stored monopoly benchmark)
 ```
 
-Both firm-level numbers match `results/delta/h1/config.json → benchmarks → monopoly`.
+Both firm-level numbers match `latest_results/config.json → benchmarks → monopoly`.
 
 ---
 
@@ -224,16 +224,7 @@ Both firm-level numbers match `results/delta/h1/config.json → benchmarks → m
 * A **template you can re-apply to the high-LMP early-iteration `g`**: just substitute that `g` into Section 5's recipe. If items (A)–(D) all pass, the LMP > monopoly-LMP region is a genuine equilibrium of the welfare problem, and the next question becomes **strategic** (why do the agents linger there? — because Σ profits is *not* maximized; they're leaving money on the table during exploration).
 * An **explicit, machine-verifiable formula** (Section 4 box) you can drop straight into a slide alongside the realized LMPs.
 
-The companion automated script is `experiments/kkt_check.py`. Single-point usage:
-
-```bash
-python3 experiments/kkt_check.py check --preset monopoly
-python3 experiments/kkt_check.py check --plant-gen "100,50,30"
-python3 experiments/kkt_check.py from-session \
-    --session results/delta/h1/sessions/session_0 --iteration 0
-```
-
-It prints exactly the table above and reports `KKT satisfied: YES, max residual ≈ 1e-9` (or shows you where any condition fails).
+Verification is manual using Sections 1–6 above (substitute any candidate `g` into Section 5). Session data lives under `latest_results/sessions/session_N/`.
 
 ---
 

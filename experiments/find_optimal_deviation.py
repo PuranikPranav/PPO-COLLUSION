@@ -9,8 +9,8 @@ This is a restricted static best response (uniform scale on policy MW). The
 full per-plant grid search lives in impulse_response._static_best_response_mw.
 
 Usage:
-    python experiments/find_optimal_deviation.py --run-dir h1
-    python experiments/find_optimal_deviation.py --run-dir h1 --session 0
+    python experiments/find_optimal_deviation.py --run-dir latest_results
+    python experiments/find_optimal_deviation.py --run-dir latest_results --session 0
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from iso_market.market_env import ElectricityMarketEnv, FIRM_PLANT_IDX, PLANTS
 from experiments.impulse_response import _static_best_response_mw, profit_firm
+from experiments.paths import DEFAULT_RUN_DIR_NAME, resolve_run_dir
 from experiments.stochastic_deviation import load_session_agents, load_or_warm_normalizers
 
 DEVIATOR_FID = 1
@@ -174,7 +175,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Find one-period profit-maximizing deviation multiplier for Firm 1."
     )
-    parser.add_argument("--run-dir", type=Path, default=Path("h1"))
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help=f"Training run directory (default: {DEFAULT_RUN_DIR_NAME}/)",
+    )
     parser.add_argument(
         "--session",
         type=int,
@@ -188,13 +194,14 @@ def main():
     parser.add_argument("--n-grid", type=int, default=76)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    run_dir = resolve_run_dir(args.run_dir)
 
-    config_path = args.run_dir / "config.json"
+    config_path = run_dir / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     history_len = int(config.get("history_len", 1))
     episode_len = int(config.get("episode_len", 168))
 
-    sessions_root = args.run_dir / "sessions"
+    sessions_root = run_dir / "sessions"
     if args.session is not None:
         session_dirs = [sessions_root / f"session_{args.session}"]
     else:

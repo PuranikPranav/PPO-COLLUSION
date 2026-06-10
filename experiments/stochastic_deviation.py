@@ -12,7 +12,7 @@ impulse response across many naturally occurring deviation events.
 
 Assumptions
 -----------
-* Trained policies are frozen — both agents act on actor mean + sigmoid (greedy).
+* Trained policies are frozen — both agents act on the Beta policy mean (greedy).
 * Rival learns nothing about the deviation directly: it only observes nodal
   LMPs through the history window (imperfect monitoring).
 * On a deviation step the deviator's MW per plant is set to
@@ -28,18 +28,20 @@ Outputs (per session, under --output-dir)
 * event_study.png   — mean ± std response in a window around deviation events
 * summary.json      — aggregated statistics (events per firm, mean impact, …)
 
+Default output dir: ``latest_results/deviation_experiment/stochastic_deviation/``
+(for cluster mirrors under ``results/…``, defaults to ``figures/<subpath>/stochastic_deviation/``).
+
 CLI
 ---
     python experiments/stochastic_deviation.py \
-        --run-dir results/delta/h1 \
+        --run-dir latest_results \
         --sessions 0,1,2 \
         --num-steps 10000 \
         --deviation-prob 1e-3 \
         --x-values 1.5,2,3 \
         --deviator random \
         --warmup-steps 500 \
-        --seed 0 \
-        --output-dir figures/delta/stochastic_deviation/h1
+        --seed 0
 """
 
 import argparse
@@ -66,6 +68,7 @@ from iso_market.market_env import (
     FIRM_PLANT_IDX,
     PLANTS,
 )
+from experiments.paths import DEFAULT_RUN_DIR_NAME, resolve_run_dir, stochastic_deviation_output_dir
 from experiments.ppo import PPOAgent, RunningNormalizer
 
 
@@ -489,9 +492,12 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Stochastic deviation analysis on trained PPO agents."
     )
-    p.add_argument("--run-dir", type=Path, required=True,
-                   help="Per-H run dir, e.g. results/delta/h1 or "
-                   "results/delta_compinit/h1")
+    p.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help=f"Training run dir (default: {DEFAULT_RUN_DIR_NAME}/; aliases: h1, results/delta_cont/h1)",
+    )
     p.add_argument("--sessions", type=str, default="0",
                    help='Comma-separated session ids, or "all". Default: "0"')
     p.add_argument("--num-steps", type=int, default=10_000,
@@ -516,8 +522,13 @@ def parse_args():
                    help="Must match training --hidden-dim (default 64)")
     p.add_argument("--event-window", type=int, default=30,
                    help="±window for event-study (default 30 steps)")
-    p.add_argument("--output-dir", type=Path, default=None,
-                   help="Default: figures/<run-dir tail>/stochastic_deviation/")
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=f"Default: {DEFAULT_RUN_DIR_NAME}/deviation_experiment/stochastic_deviation/ "
+        "or figures/<results subpath>/stochastic_deviation/",
+    )
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--cuda", action="store_true")
     return p.parse_args()
@@ -527,7 +538,7 @@ def main():
     args = parse_args()
     device = "cuda" if (args.cuda and torch.cuda.is_available()) else "cpu"
 
-    run_dir: Path = args.run_dir
+    run_dir = resolve_run_dir(args.run_dir)
     if not run_dir.is_dir():
         raise FileNotFoundError(f"--run-dir not found: {run_dir}")
 
@@ -554,9 +565,7 @@ def main():
             "No matching session directories with agent weights — check --sessions"
         )
 
-    out_dir = args.output_dir or (
-        Path("figures") / run_dir.relative_to("results") / "stochastic_deviation"
-    )
+    out_dir = args.output_dir or stochastic_deviation_output_dir(run_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     x_sampler, x_label = build_x_sampler(args)

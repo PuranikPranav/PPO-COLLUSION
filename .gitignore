@@ -1,6 +1,7 @@
 __pycache__/
 venv/
 results/
+latest_results/
 *.pt
 slurm-*.out
 slurm-*.err
