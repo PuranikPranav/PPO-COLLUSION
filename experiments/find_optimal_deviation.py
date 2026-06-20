@@ -209,7 +209,12 @@ def main():
             d for d in sessions_root.iterdir() if d.is_dir() and (d / "agent_0.pt").exists()
         )
 
-    env = ElectricityMarketEnv(history_len=history_len, episode_len=episode_len)
+    env = ElectricityMarketEnv(
+        history_len=history_len,
+        episode_len=episode_len,
+        include_past_gen=bool(config.get("include_past_gen", True)),
+        include_prev_reward=bool(config.get("include_prev_reward", True)),
+    )
     results = []
 
     for s_dir in session_dirs:

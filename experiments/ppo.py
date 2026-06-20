@@ -181,6 +181,35 @@ class ActorCritic(nn.Module):
         beta = F.softplus(beta_logits) + 1e-3
         return alpha, beta
 
+    @torch.no_grad()
+    def init_policy_mean(self, target_fraction, concentration: float = 2.5,
+                         weight_scale: float = 0.3):
+        """Bias the actor so the *initial* Beta mean equals ``target_fraction`` per plant.
+
+        With a Beta(α, β) policy the mean is α/(α+β); we set α = m·c, β = (1−m)·c for the
+        target mean m and a (deliberately low) concentration c so the initial policy still
+        samples broadly across the action space. The final-layer weights are kept (scaled
+        by ``weight_scale``) so different seeds start with genuine spread *around* the
+        competitive baseline rather than all collapsing onto an identical point.
+        """
+        last = self.actor_net[-1]
+        act_dim = last.out_features // 2
+        m = np.clip(np.asarray(target_fraction, dtype=np.float64), 1e-3, 1.0 - 1e-3)
+        c = float(concentration)
+        alpha_t = np.clip(m * c, 1e-3 + 1e-6, None)
+        beta_t = np.clip((1.0 - m) * c, 1e-3 + 1e-6, None)
+
+        def softplus_inv(y):
+            # inverse of softplus: x s.t. softplus(x) = y  (y > 0)
+            return np.log(np.expm1(np.clip(y, 1e-6, None)))
+
+        b_alpha = softplus_inv(alpha_t - 1e-3)
+        b_beta = softplus_inv(beta_t - 1e-3)
+        bias = np.concatenate([b_alpha, b_beta]).astype(np.float32)
+
+        last.weight.mul_(weight_scale)
+        last.bias.copy_(torch.from_numpy(bias).to(last.bias.device))
+
     def policy(self, obs):
         alpha, beta = self.get_alpha_beta(obs)
         return Beta(alpha, beta)
@@ -552,11 +581,12 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     for pidx, plant in enumerate(PLANTS):
         gen_per_node[plant["node"]] += gen_per_plant[pidx]
 
-    lmps, _demand, _flows, _shadow = env._clear_market(gen_per_node)
+    lmps, demand, _flows, _shadow = env._clear_market(gen_per_node)
     if lmps is None:
         return {
             "greedy_totals": greedy_totals,
             "greedy_delta_combined": float("nan"),
+            "greedy_avg_lmp": float("nan"),
         }
 
     profits = {}
@@ -568,8 +598,13 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
             p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g * g
         profits[fid] = p
 
+    avg_lmp = (
+        float(np.sum(lmps * demand) / np.sum(demand)) if np.sum(demand) > 0 else float("nan")
+    )
+
     return {
         "greedy_totals": greedy_totals,
+        "greedy_avg_lmp": avg_lmp,
         "greedy_delta_combined": float(
             compute_combined_delta(profits, pi_nash, pi_mono)
         ),
@@ -606,35 +641,52 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
 # ======================================================================
 # Post-training analysis
 # ======================================================================
-def _obs_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
-    """Build one per-step obs vector; scale LMPs, keep competitive flows/shadows."""
-    base = env._baseline_obs_vector.astype(np.float64)
-    comp_lmps = base[:NUM_NODES]
-    tail = base[NUM_NODES:]
+def _public_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
+    """Build one PUBLIC per-step vector; scale LMPs, keep competitive flows/shadows/gens."""
+    market = env._baseline_obs_vector.astype(np.float64)  # market-only slice (LMPs, flows, shadow)
+    comp_lmps = market[:NUM_NODES]
+    tail = market[NUM_NODES:]
     comp_avg = float(np.mean(comp_lmps))
     if comp_avg > 0:
         scaled_lmps = comp_lmps * (target_avg_lmp / comp_avg)
     else:
         scaled_lmps = np.full(NUM_NODES, target_avg_lmp, dtype=np.float64)
-    return np.concatenate([scaled_lmps, tail])
+    scaled_market = np.concatenate([scaled_lmps, tail])
+    return env._assemble_public_vector(scaled_market, env._baseline_gens)
+
+
+# Back-compat alias for older callers.
+def _obs_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
+    return _public_vector_with_scaled_lmps(env, target_avg_lmp)
+
+
+def _per_firm_reference_obs(env, public_vec: np.ndarray, fid: int) -> np.ndarray:
+    """Assemble a firm-specific tiled observation from a single public per-step vector.
+
+    Appends the firm's competitive-baseline own-reward to each historical step when
+    ``include_prev_reward`` is enabled, then tiles ``history_len`` times.
+    """
+    if env.include_prev_reward:
+        row = np.concatenate([public_vec, [env._baseline_firm_reward[fid]]])
+    else:
+        row = public_vec
+    return np.tile(row, env.history_len).astype(np.float32)
 
 
 def build_reference_obs(env, benchmarks, num_points=20):
-    """Grid of observations spanning plausible average LMP (limit-strategy sweep)."""
-    comp_avg = float(np.mean(env._baseline_obs_vector[:NUM_NODES]))
+    """Grid of PUBLIC observations spanning plausible average LMP (limit-strategy sweep)."""
     targets = np.linspace(15, 38, num_points)
-    ref_obs = []
-    for target in targets:
-        obs_vec = _obs_vector_with_scaled_lmps(env, target)
-        ref_obs.append(np.tile(obs_vec, env.history_len).astype(np.float32))
-    return np.array(ref_obs)
+    return np.array([_public_vector_with_scaled_lmps(env, t) for t in targets])
 
 
-def evaluate_deterministic(agents, obs_normalizers, ref_obs):
-    """Evaluate each agent's deterministic (greedy) output on reference states."""
+def evaluate_deterministic(agents, obs_normalizers, env, ref_public):
+    """Evaluate each agent's deterministic (greedy) output on reference public states."""
     result = {}
     for fid, agent in agents.items():
-        normed = np.array([obs_normalizers[fid].normalize(o) for o in ref_obs])
+        normed = np.array([
+            obs_normalizers[fid].normalize(_per_firm_reference_obs(env, p, fid))
+            for p in ref_public
+        ])
         obs_t = torch.from_numpy(normed).to(agent.device)
         with torch.no_grad():
             alpha, beta = agent.ac.get_alpha_beta(obs_t)
@@ -649,10 +701,9 @@ def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=
 
     strategies = {str(fid): [] for fid in range(NUM_FIRMS)}
     for target in lmp_grid:
-        obs = np.tile(
-            _obs_vector_with_scaled_lmps(env, target), env.history_len
-        ).astype(np.float32)
+        public_vec = _public_vector_with_scaled_lmps(env, target)
         for fid, agent in agents.items():
+            obs = _per_firm_reference_obs(env, public_vec, fid)
             obs_norm = obs_normalizers[fid].normalize(obs)
             gen_mw = agent.deterministic_action(obs_norm)
             strategies[str(fid)].append(float(np.sum(gen_mw)))
@@ -838,6 +889,7 @@ def train_session(env, benchmarks, args, session_id, device):
     pi_mono = _benchmark_profits_by_firm(benchmarks, "monopoly")
 
     # Fresh agents
+    comp_gens = benchmarks["competitive"]["gens"]
     agents = {}
     obs_normalizers = {}
     for fid in range(NUM_FIRMS):
@@ -847,6 +899,18 @@ def train_session(env, benchmarks, args, session_id, device):
             caps=caps, hidden=args.hidden_dim, lr=args.lr,
             rollout_len=args.rollout_len, device=device,
         )
+        # Start each firm's greedy generation at the competitive baseline so every
+        # session begins from the (observation-seeded) competitive point, with broad
+        # initial sampling around it.
+        if args.init_policy == "competitive":
+            target_frac = np.array(
+                [comp_gens[pidx] / PLANTS[pidx]["cap"] for pidx in FIRM_PLANT_IDX[fid]]
+            )
+            agents[fid].ac.init_policy_mean(
+                target_frac,
+                concentration=args.init_concentration,
+                weight_scale=args.init_weight_scale,
+            )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
     # Early stopping: Δ-stability, policy KL, or none (--convergence-mode)
@@ -872,14 +936,47 @@ def train_session(env, benchmarks, args, session_id, device):
     converged = False
 
     smoothing_steps = 200 * args.episode_len if args.episode_len > 0 else 33600
-    recent_lmps = deque(maxlen=2000)
+    # LMP / generation are smoothed over the *current rollout only* so each logged point
+    # reflects recent behavior. This is what surfaces the wide initial spread (and its
+    # narrowing over training) across sessions — a 2000-step window washed it out before.
+    recent_lmps = deque(maxlen=args.rollout_len)
     recent_step_profits = {f: deque(maxlen=smoothing_steps) for f in range(NUM_FIRMS)}
-    recent_gens = {f: deque(maxlen=2000) for f in range(NUM_FIRMS)}
+    recent_gens = {f: deque(maxlen=args.rollout_len) for f in range(NUM_FIRMS)}
 
     num_updates = args.total_timesteps // args.rollout_len
     wall_start = time.time()
 
     _print_session_convergence_banner(args, session_id)
+
+    # ---------- step-0 snapshot of the *untrained* policy ----------
+    # Captures the genuine initial dispersion across seeds (before any PPO update),
+    # which is exactly the wide starting band that heavy smoothing + logging-at-update-5
+    # used to hide. Greedy generation here starts at the competitive baseline by design.
+    init_obs_by_firm = {
+        fid: obs_normalizers[fid].normalize(obs[fid])[np.newaxis, :]
+        for fid in agents
+    }
+    gr0 = compute_greedy_metrics_from_obs(
+        env, agents, init_obs_by_firm, pi_nash, pi_mono
+    )
+    if gr0 is not None:
+        init_row = {
+            "step": 0,
+            "episodes": 0,
+            "wall_sec": 0.0,
+            "ppo_update": 0,
+            "ppo_updates_total": num_updates,
+            "convergence_mode": args.convergence_mode,
+            "early_stop_active": use_convergence,
+            "avg_lmp": float(gr0.get("greedy_avg_lmp", float("nan"))),
+            "delta_combined": float(gr0["greedy_delta_combined"]),
+            "greedy_delta_combined": float(gr0["greedy_delta_combined"]),
+        }
+        for fid in range(NUM_FIRMS):
+            g = float(gr0["greedy_totals"][fid])
+            init_row[f"firm_{fid}_greedy_gen"] = g
+            init_row[f"firm_{fid}_avg_gen"] = g
+        log_rows.append(init_row)
 
     for update in range(num_updates):
         # ---------- collect rollout ----------
@@ -1037,7 +1134,15 @@ def train_session(env, benchmarks, args, session_id, device):
         prev_delta_combined = delta_combined_now
 
         # ---------- logging ----------
-        if (update + 1) % args.log_interval == 0:
+        # Always log the first few updates so the early (high-variance) phase is densely
+        # sampled, then fall back to the regular interval.
+        is_last_update = update == num_updates - 1
+        log_now = (
+            update < args.log_interval
+            or (update + 1) % args.log_interval == 0
+            or is_last_update
+        )
+        if log_now:
             avg_lmp = np.mean(recent_lmps) if recent_lmps else 0
             gr = compute_greedy_metrics_from_obs(
                 env, agents, rollout_obs_backup, pi_nash, pi_mono
@@ -1127,7 +1232,12 @@ def train_session(env, benchmarks, args, session_id, device):
 
     # ---------- post-training analysis ----------
     limit_strat = compute_limit_strategy(agents, obs_normalizers, env, benchmarks)
-    deviation_exp = run_deviation_experiment(env, agents, obs_normalizers)
+    deviation_exp = run_deviation_experiment(
+        env, agents, obs_normalizers,
+        deviation_frac=args.deviation_frac,
+        warmup=args.deviation_warmup,
+        horizon=args.deviation_horizon,
+    )
 
     final_avg_step = {}
     for fid in range(NUM_FIRMS):
@@ -1165,6 +1275,8 @@ def main(args):
     env = ElectricityMarketEnv(
         history_len=args.history_len,
         episode_len=args.episode_len,
+        include_past_gen=args.include_past_gen,
+        include_prev_reward=args.include_prev_reward,
     )
 
     # Compute benchmarks
@@ -1272,6 +1384,49 @@ def parse_args():
     # Environment
     p.add_argument("--history-len", type=int, default=1)
     p.add_argument("--episode-len", type=int, default=168)
+    p.add_argument(
+        "--no-past-gen",
+        dest="include_past_gen",
+        action="store_false",
+        help="Drop last period's per-plant generation from the state (default: included).",
+    )
+    p.add_argument(
+        "--no-prev-reward",
+        dest="include_prev_reward",
+        action="store_false",
+        help="Drop each firm's own previous-period reward from the state (default: included).",
+    )
+    p.set_defaults(include_past_gen=True, include_prev_reward=True)
+
+    # Policy initialization
+    p.add_argument(
+        "--init-policy",
+        type=str,
+        default="competitive",
+        choices=("competitive", "default"),
+        help="competitive: initialize each firm's greedy generation at the competitive "
+        "baseline (so sessions start from the competitive point). default: standard "
+        "random init (mean ≈ 0.5·cap).",
+    )
+    p.add_argument(
+        "--init-concentration",
+        type=float,
+        default=2.5,
+        help="Initial Beta concentration α+β at the target mean (lower = broader initial "
+        "sampling / wider starting band).",
+    )
+    p.add_argument(
+        "--init-weight-scale",
+        type=float,
+        default=0.3,
+        help="Scale applied to the actor output-layer weights at init so seeds spread "
+        "around the competitive baseline instead of collapsing onto one point.",
+    )
+
+    # Post-training deviation (impulse-response) experiment
+    p.add_argument("--deviation-frac", type=float, default=0.2)
+    p.add_argument("--deviation-warmup", type=int, default=20)
+    p.add_argument("--deviation-horizon", type=int, default=40)
 
     # PPO
     p.add_argument("--total-timesteps", type=int, default=500_000,

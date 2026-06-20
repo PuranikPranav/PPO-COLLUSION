@@ -17,7 +17,7 @@ exec sbatch \
   --gres=gpu:1 \
   --cpus-per-task=8 \
   --mem=50G \
-  --time=4-00:00:00 \
+  --time=8-00:00:00 \
   --output=slurm-h1-delta-%j.out \
   --error=slurm-h1-delta-%j.err \
   run_gilbreth_h_delta.sh 1

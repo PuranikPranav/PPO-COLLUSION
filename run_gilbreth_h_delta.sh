@@ -11,7 +11,12 @@
 #   results/delta_cont/h<H>/
 #   figures/delta_cont/   (per-H Calvano PNGs; compare plots need multiple H dirs)
 #
-# Obs dim = history_len × 15 (5 nodal LMPs + 10 line shadow/flow features per step).
+# Obs dim = history_len × 19 per firm:
+#   15 market signals (5 nodal LMPs + 10 line shadow/flow) + 3 per-plant past
+#   generation + 1 firm's own previous-period reward.
+# Policy is initialized at the competitive baseline (--init-policy competitive, default).
+#
+# Override session count for the full paper-scale sweep:  SESSIONS=1000 sbatch ...
 #
 #SBATCH --job-name=ppo-h-delta
 #SBATCH --account=liu334
@@ -30,7 +35,7 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 export PYTHONUNBUFFERED=1
 
 H="${1:-1}"
-OBS_PER_STEP=15
+OBS_PER_STEP=19  # 15 market + 3 past-gen + 1 own prev-reward
 OBS_DIM=$((H * OBS_PER_STEP))
 
 module purge
@@ -54,7 +59,7 @@ fi
 MODE="delta"
 RESULTS_ROOT="results/delta_cont"
 FIGURES_ROOT="figures/delta_cont"
-SESSIONS=100
+SESSIONS="${SESSIONS:-100}"
 TIMESTEPS=2000000
 PATIENCE=100
 DELTA_CONV_THRESH="${DELTA_CONV_THRESH:-0.01}"

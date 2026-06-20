@@ -319,6 +319,8 @@ def main():
         env = ElectricityMarketEnv(
             history_len=int(config.get("history_len", 1)),
             episode_len=int(config.get("episode_len", 168)),
+            include_past_gen=bool(config.get("include_past_gen", True)),
+            include_prev_reward=bool(config.get("include_prev_reward", True)),
         )
         agents = load_session_agents(s_dir, env)
         normalizers = load_or_warm_normalizers(s_dir, env, agents, warmup_steps=500)

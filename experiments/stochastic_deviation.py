@@ -597,7 +597,12 @@ def main():
         np.random.seed(sess_seed)
         rng = np.random.default_rng(sess_seed)
 
-        env = ElectricityMarketEnv(history_len=history_len, episode_len=episode_len)
+        env = ElectricityMarketEnv(
+            history_len=history_len,
+            episode_len=episode_len,
+            include_past_gen=bool(config.get("include_past_gen", True)),
+            include_prev_reward=bool(config.get("include_prev_reward", True)),
+        )
         agents = load_session_agents(session_dir, env, hidden=args.hidden_dim, device=device)
         normalizers = load_or_warm_normalizers(
             session_dir, env, agents, warmup_steps=args.warmup_steps
