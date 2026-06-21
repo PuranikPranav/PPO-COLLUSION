@@ -1414,6 +1414,147 @@ def plot_generation_profit_comparison(run_dirs, save_dir: Path):
     print(f"Saved → {out}")
 
 
+def plot_variance_funnel(config, sessions, save_dir: Path, history_label=None):
+    """Cross-session generation band vs PPO iteration (log-x), plus band width (std).
+
+    Surfaces the early high-variance fan-out: every session starts at the (pinned)
+    competitive point, so the band is thin at iteration 1, widens sharply as sessions
+    diverge during early learning, then narrows as they converge. Top row = mean ± std
+    bands; bottom row = the cross-session std (band width) over iterations.
+    """
+    if not sessions:
+        print("No sessions for variance funnel.")
+        return
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    use_greedy = (
+        not _metrics_has_key(sessions, "firm_0_avg_gen")
+        and _metrics_has_key(sessions, "firm_0_greedy_gen")
+    )
+    gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
+
+    bench = config.get("benchmarks", {})
+
+    def firm_levels(key):
+        gens = bench.get(key, {}).get("gens")
+        return [gens[0] + gens[1], gens[2]] if gens else None
+
+    comp_f, nash_f, mono_f = (firm_levels(k) for k in ("competitive", "cournot_nash", "monopoly"))
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    for fid in range(2):
+        x, mean, std = _aggregate_metric_by_iteration(sessions, gkey.format(fid))
+        ax = axes[0, fid]
+        if x:
+            x = np.asarray(x, float)
+            mean = np.asarray(mean, float)
+            std = np.asarray(std, float)
+            ax.plot(x, mean, color=f"C{fid}", lw=1.6, label=f"Firm {fid} mean")
+            if n > 1:
+                ax.fill_between(
+                    x, mean - std, mean + std, color=f"C{fid}", alpha=0.2,
+                    label="±1 std across sessions",
+                )
+            for lvl, ls, col, lbl in (
+                (comp_f, "--", "green", "Competitive"),
+                (nash_f, "-.", "orange", "Cournot–Nash"),
+                (mono_f, ":", "red", "Monopoly"),
+            ):
+                if lvl:
+                    ax.axhline(lvl[fid], ls=ls, color=col, alpha=0.65, lw=1.0, label=lbl)
+            ax.set_xscale("log")
+        ax.set_title(f"Firm {fid}: generation band vs PPO iteration (log-x)")
+        ax.set_xlabel("PPO iteration (log scale)")
+        ax.set_ylabel("Generation (MW)")
+        ax.grid(alpha=0.3, which="both")
+        ax.legend(fontsize=7)
+
+        axw = axes[1, fid]
+        if x is not None and len(x):
+            axw.plot(x, std, color=f"C{fid}", lw=1.6)
+            axw.fill_between(x, 0, std, color=f"C{fid}", alpha=0.15)
+            axw.set_xscale("log")
+        axw.set_title(f"Firm {fid}: cross-session std (band width) vs iteration")
+        axw.set_xlabel("PPO iteration (log scale)")
+        axw.set_ylabel("Std of generation (MW)")
+        axw.grid(alpha=0.3, which="both")
+
+    fig.suptitle(
+        f"Initial-variance fan-out — H={h} ({n} sessions): thin at the competitive "
+        "start, widens as sessions diverge, then narrows on convergence",
+        fontsize=12,
+        y=1.0,
+    )
+    fig.tight_layout()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / f"variance_funnel_h{h}.png"
+    fig.savefig(out, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved → {out}")
+
+
+def plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir: Path, history_label=None):
+    """Per-firm profit vs PPO iteration with that firm's OWN competitive/Nash/monopoly lines.
+
+    Makes the asymmetry explicit: Firm 1's Nash profit can exceed its monopoly profit, so the
+    joint-monopoly allocation is not individually rational for it — which is exactly what
+    bounds the combined Δ below 1.
+    """
+    if not sessions:
+        print("No sessions for per-firm profit plot.")
+        return
+    if not _metrics_has_key(sessions, "firm_0_avg_step_profit"):
+        print("No per-step profit metric (firm_*_avg_step_profit) in sessions.")
+        return
+
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    bench = config.get("benchmarks", {})
+    comp = bench.get("competitive", {}).get("profits", {})
+    nash = bench.get("cournot_nash", {}).get("profits", {})
+    mono = bench.get("monopoly", {}).get("profits", {})
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+    for fid in range(2):
+        ax = axes[fid]
+        x, mean, std = _aggregate_metric_by_iteration(sessions, f"firm_{fid}_avg_step_profit")
+        if x:
+            x = np.asarray(x, float)
+            mean = np.asarray(mean, float)
+            std = np.asarray(std, float)
+            ax.plot(x, mean, color=f"C{fid}", lw=1.6, label=f"Firm {fid} profit (mean)")
+            if n > 1:
+                ax.fill_between(
+                    x, mean - std, mean + std, color=f"C{fid}", alpha=0.18,
+                    label="±1 std across sessions",
+                )
+        for table, ls, col, name in (
+            (comp, "--", "green", "Competitive"),
+            (nash, "-.", "orange", "Nash"),
+            (mono, ":", "red", "Monopoly"),
+        ):
+            if str(fid) in table:
+                val = float(table[str(fid)])
+                ax.axhline(val, ls=ls, color=col, alpha=0.75, lw=1.2, label=f"{name} (${val:.0f})")
+        ax.set_title(f"Firm {fid}: profit vs PPO iteration")
+        ax.set_xlabel("PPO iteration")
+        ax.set_ylabel("Profit ($/step)")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"Per-firm profit vs each firm's own benchmarks — H={h} ({n} sessions)",
+        fontsize=13,
+        y=1.02,
+    )
+    fig.tight_layout()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / f"per_firm_profit_h{h}.png"
+    fig.savefig(out, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved → {out}")
+
+
 # ====================== Main ======================
 def main():
     parser = argparse.ArgumentParser(description="Calvano-style plots for PPO collusion")
@@ -1443,6 +1584,18 @@ def main():
         "--deviation-explainer",
         action="store_true",
         help="Advisor-friendly impulse-response figure: generation + LMP per deviator (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--variance-funnel",
+        action="store_true",
+        help="Cross-session generation band + std vs PPO iteration (log-x): shows the early "
+        "high-variance fan-out narrowing on convergence (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--per-firm-profit",
+        action="store_true",
+        help="Per-firm profit vs PPO iteration with each firm's own competitive/Nash/monopoly "
+        "lines (one PNG per run dir).",
     )
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
@@ -1496,6 +1649,28 @@ def main():
             config, sessions = load_sessions(rd)
             h = config.get("history_len", "?")
             plot_deviation_explainer(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.variance_funnel:
+        if not args.save:
+            parser.error("--variance-funnel requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_variance_funnel(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.per_firm_profit:
+        if not args.save:
+            parser.error("--per-firm-profit requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir, history_label=h)
         return
 
     for rd in run_dirs:
