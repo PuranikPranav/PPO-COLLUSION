@@ -74,15 +74,27 @@ mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
 
 # Separate env for vLLM (it pins its own torch; keep it apart from the PPO env).
 ENV_DIR="${ENV_DIR:-$SCRATCH/envs/ppo-llm}"
-PY=python3
-command -v "$PY" >/dev/null || PY=python
 
-PY_VER="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
-    echo "ERROR: need Python >= 3.10 for vLLM (found ${PY_VER})."
-    echo "  Try: module avail python   then  PYTHON_MODULE=python/3.11 sbatch ..."
+# Pick the newest interpreter that is >= 3.10. On Gilbreth, Anaconda's `python`
+# is 3.12 while the bare `python3` is still the system 3.9, so search explicitly.
+PY=""
+for cand in python3.12 python3.11 python3.10 python python3; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+        PY="$cand"
+        break
+    fi
+done
+
+if [ -z "$PY" ]; then
+    echo "ERROR: no Python >= 3.10 found (needed for vLLM 0.11)."
+    echo "  Loaded module: ${PYTHON_MODULE:-none}"
+    echo "  python  -> $(command -v python  2>/dev/null) $(python  --version 2>&1)"
+    echo "  python3 -> $(command -v python3 2>/dev/null) $(python3 --version 2>&1)"
+    echo "  Try: module avail anaconda   then  PYTHON_MODULE=anaconda/2024.10-py312 sbatch ..."
     exit 1
 fi
+PY_VER="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 
 # Drop a stale venv built with an older interpreter (e.g. system python3.9).
 if [ -d "$ENV_DIR" ] && ! "$ENV_DIR/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
