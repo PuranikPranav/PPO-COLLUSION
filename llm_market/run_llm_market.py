@@ -96,11 +96,21 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
     parse_failures = 0
 
     for t in range(args.num_periods):
-        # Build prompts -> ONE batched LLM call -> parse JSON -> MW per firm.
-        actions_mw, parsed_by_firm = select_actions_llm(
-            engine, env, obs, benchmarks, args, schemas, last_actions,
-            memories=memories, latest_state=latest_state, seed=base_seed + t,
-        )
+        if t < args.warmup_competitive:
+            # Seed the trajectory at the competitive baseline so the run visibly starts
+            # from competition and the LLM's first real decisions already have a sensible
+            # price/profit history to reason from (these rounds are NOT model choices).
+            actions_mw = {f: competitive_default_mw(env, f) for f in range(NUM_FIRMS)}
+            parsed_by_firm = {
+                f: {"mw": actions_mw[f], "reasoning": "", "strategy": "", "parse_ok": True}
+                for f in range(NUM_FIRMS)
+            }
+        else:
+            # Build prompts -> ONE batched LLM call -> parse JSON -> MW per firm.
+            actions_mw, parsed_by_firm = select_actions_llm(
+                engine, env, obs, benchmarks, args, schemas, last_actions,
+                memories=memories, latest_state=latest_state, seed=base_seed + t,
+            )
         for f in range(NUM_FIRMS):
             if memories is not None:
                 memories[f].set_strategy(parsed_by_firm[f].get("strategy", ""))
@@ -305,7 +315,8 @@ def parse_args():
                    help="mock = no GPU (pipeline test); vllm = A100 batched; transformers = HF fallback.")
     p.add_argument("--model", type=str, default=DEFAULT_MODEL)
     p.add_argument("--temperature", type=float, default=0.7)
-    p.add_argument("--max-tokens", type=int, default=256)
+    p.add_argument("--max-tokens", type=int, default=512,
+                   help="Token budget per response; needs headroom for the reasoning field.")
     p.add_argument("--max-model-len", type=int, default=8192)
     p.add_argument("--tensor-parallel-size", type=int, default=1,
                    help="GPUs for vLLM tensor parallelism (use 2 for the 30B model).")
@@ -318,12 +329,18 @@ def parse_args():
     p.add_argument("--num-sessions", type=int, default=3)
     p.add_argument("--num-periods", type=int, default=60,
                    help="Decision periods per session (repeated interactions).")
+    p.add_argument("--warmup-competitive", type=int, default=0,
+                   help="Force both firms to the competitive-baseline output for the first "
+                        "N rounds, so the run starts from competition and the LLM's first "
+                        "real decisions already have a price/profit history to reason from.")
     p.add_argument("--history-window", type=int, default=10,
-                   help="Legacy mode only: sliding-window memory in the prompt.")
+                   help="Memory mode: number of past rounds shown in the prompt.")
     p.add_argument("--ppo-parity", action="store_true", default=True,
-                   help="Use the exact PPO observation vector (default).")
+                   help="Feed the raw 19-number PPO observation (fair-information "
+                        "comparison). Poor at eliciting reasoning — collusion rarely emerges.")
     p.add_argument("--legacy-memory", dest="ppo_parity", action="store_false",
-                   help="Use older narrative memory + strategy note instead of PPO obs.")
+                   help="RECOMMENDED for the collusion study: narrative history + carried "
+                        "strategy note, which lets the model reason about price impact.")
     p.add_argument("--goal", type=str, default="own_profit",
                    choices=("own_profit", "joint_profit"))
 

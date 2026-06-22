@@ -47,9 +47,10 @@ GOAL="${GOAL:-own_profit}"            # own_profit | joint_profit
 TP="${TP:-1}"                       # tensor-parallel GPUs
 QUANT="${QUANT:-}"                  # empty = bf16
 TEMPERATURE="${TEMPERATURE:-0.7}"
-MAXTOK="${MAXTOK:-256}"               # reasoning + generation JSON
+MAXTOK="${MAXTOK:-512}"               # reasoning + generation JSON (needs headroom to reason)
 MAXLEN="${MAXLEN:-8192}"
 SEED="${SEED:-42}"
+WARMUP_COMP="${WARMUP_COMP:-0}"       # force competitive baseline for first N rounds (clean start)
 # Punishment / impulse-response experiment (Calvano-style retaliation figure).
 DEV_FRAC="${DEV_FRAC:-0.2}"
 DEV_WARMUP="${DEV_WARMUP:-8}"
@@ -172,6 +173,7 @@ python llm_market/run_llm_market.py \
     --model "$MODEL" \
     --num-sessions "$SESSIONS" \
     --num-periods "$PERIODS" \
+    --warmup-competitive "$WARMUP_COMP" \
     --history-len "$HISTORY_LEN" \
     --history-window "$WINDOW" \
     --goal "$GOAL" \
