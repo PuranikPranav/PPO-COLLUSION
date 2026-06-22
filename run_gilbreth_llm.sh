@@ -50,8 +50,19 @@ if [ -n "${PYTHON_MODULE:-}" ]; then
     module load "$PYTHON_MODULE"
 fi
 
+# IMPORTANT: home has a small quota (~25 GB). vLLM+torch+CUDA (~10 GB) and the
+# model cache must live on scratch, which has a large quota. Resolve scratch.
+SCRATCH="${RCAC_SCRATCH:-/scratch/gilbreth/$USER}"
+[ -d "$SCRATCH" ] || SCRATCH="$HOME/scratch"
+mkdir -p "$SCRATCH"
+
+# Keep pip's build/cache off home, too.
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$SCRATCH/pip_cache}"
+export TMPDIR="${TMPDIR:-$SCRATCH/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+
 # Separate env for vLLM (it pins its own torch; keep it apart from the PPO env).
-ENV_DIR="$HOME/envs/ppo-llm"
+ENV_DIR="${ENV_DIR:-$SCRATCH/envs/ppo-llm}"
 PY=python3
 command -v "$PY" >/dev/null || PY=python
 if [ ! -d "$ENV_DIR" ]; then
@@ -64,7 +75,7 @@ else
 fi
 
 # Cache HF weights on scratch so they persist and aren't re-downloaded.
-export HF_HOME="${HF_HOME:-$HOME/scratch/hf_cache}"
+export HF_HOME="${HF_HOME:-$SCRATCH/hf_cache}"
 mkdir -p "$HF_HOME"
 
 QUANT_ARG=""
@@ -76,6 +87,7 @@ echo "#  model=${MODEL} backend=${BACKEND} TP=${TP} quant='${QUANT}'"
 echo "#  sessions=${SESSIONS} periods=${PERIODS} window=${WINDOW}"
 echo "#  GPU: ${CUDA_VISIBLE_DEVICES:-(Slurm-assigned)}  job=${SLURM_JOB_ID:-local}"
 echo "#  results -> ${OUTPUT_DIR}   HF_HOME=${HF_HOME}"
+echo "#  venv=${ENV_DIR}  pip_cache=${PIP_CACHE_DIR}"
 echo "####################################################################"
 
 python llm_market/run_llm_market.py \
