@@ -48,9 +48,12 @@ module purge
 module load cuda 2>/dev/null || true
 
 # vLLM 0.11+ requires Python >= 3.10 (uses PEP-604 `X | Y` type syntax).
-PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
+# Gilbreth ships Python via Anaconda, not a `python` module. py312 is the sweet
+# spot: satisfies vLLM and has wheels for every dep (torch, numba, etc.). py313
+# is avoided because some pinned deps lack 3.13 wheels.
+PYTHON_MODULE="${PYTHON_MODULE:-anaconda/2024.10-py312}"
 if ! module load "$PYTHON_MODULE" 2>/dev/null; then
-    for alt in python/3.10 python3/3.11 python3/3.10; do
+    for alt in anaconda/2025.06-py313 anaconda python/3.12 python/3.11 python/3.10; do
         if module load "$alt" 2>/dev/null; then
             PYTHON_MODULE="$alt"
             break
