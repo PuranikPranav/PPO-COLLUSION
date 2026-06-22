@@ -1,10 +1,12 @@
 """
-Step 2 — Memory & Prompt: sliding-window history -> chat messages.
+Step 2 — Prompt builder: PPO observation -> chat messages.
 
-Maintains a per-firm rolling memory of recent periods and assembles the chat
-messages (system + user) sent to the Granite model. The system prompt frames the
-firm as a self-interested repeated competitor; it does NOT instruct the agent to
-collude, so any supra-competitive behavior is emergent.
+Default mode (ppo_parity=True) mirrors the PPO agents exactly:
+  - One prompt per firm built from ``env._get_obs()[firm_id]`` (19 values when H=1).
+  - JSON response with floating-point ``generation_mw`` clipped to plant capacity.
+  - No separate narrative memory or strategy note.
+
+Legacy mode (ppo_parity=False) keeps the older sliding-window memory + strategy note.
 """
 
 from __future__ import annotations
@@ -12,24 +14,18 @@ from __future__ import annotations
 from collections import deque
 from typing import Optional
 
+import numpy as np
+
 from llm_market.state_translator import (
     plant_economics_text,
     firm_plant_caps,
-    firm_total_cap,
-    market_outcome_text,
-    initial_state_text,
+    observation_vector_to_text,
     benchmark_context_text,
 )
 
 
 class AgentMemory:
-    """Rolling window of a firm's own recent experience.
-
-    Beyond the windowed per-period log, this also tracks the firm's *cumulative*
-    profit (the actual long-run objective) and the latest carried-forward
-    ``strategy`` note. Because the model's weights are frozen, the strategy note is
-    the only channel by which the agent can accumulate and refine a plan over time.
-    """
+    """Legacy sliding-window memory (used only when ``ppo_parity=False``)."""
 
     def __init__(self, window: int = 10):
         self.window = window
@@ -50,7 +46,6 @@ class AgentMemory:
         })
 
     def set_strategy(self, strategy: str):
-        """Carry forward the agent's own standing plan to the next period."""
         if strategy and strategy.strip():
             self.latest_strategy = strategy.strip()
 
@@ -67,65 +62,97 @@ class AgentMemory:
                 f"your profit ${e['profit']:.0f}."
             )
         lines.append(
-            f"  --> Your CUMULATIVE profit so far: ${self.cumulative_profit:.0f} "
-            f"(this is what you ultimately want to maximize)."
+            f"  --> Your CUMULATIVE profit so far: ${self.cumulative_profit:.0f}."
         )
         return "\n".join(lines)
 
 
-def build_system_prompt(firm_id: int, goal: str = "own_profit") -> str:
+def build_system_prompt(
+    firm_id: int,
+    goal: str = "own_profit",
+    *,
+    ppo_parity: bool = True,
+    include_strategy: bool = False,
+) -> str:
     caps = firm_plant_caps(firm_id)
     n_plants = len(caps)
     cap_list = ", ".join(f"{c:.0f}" for c in caps)
 
     goal_line = {
         "own_profit": (
-            "Your objective is to MAXIMIZE YOUR OWN cumulative profit over the long "
-            "run. You face the same competitor every period, repeatedly and "
-            "indefinitely."
+            "Your objective is to MAXIMIZE YOUR OWN profit over repeated interactions "
+            "with the same competitor."
         ),
         "joint_profit": (
             "Your objective is to maximize total industry profit across both firms."
         ),
-    }.get(goal, "Your objective is to maximize your own cumulative profit.")
+    }.get(goal, "Your objective is to maximize your own profit.")
+
+    json_fields = (
+        f'{{"reasoning": "<brief explanation>", '
+        f'"generation_mw": [<{n_plants} floating-point MW value(s), one per plant>]}}'
+    )
+    if include_strategy and not ppo_parity:
+        json_fields = (
+            f'{{"reasoning": "<brief explanation>", '
+            f'"strategy": "<standing plan>", '
+            f'"generation_mw": [<{n_plants} floating-point MW value(s), one per plant>]}}'
+        )
+
+    parity_note = ""
+    if ppo_parity:
+        parity_note = (
+            "You receive the same 19-number observation state as the RL agents "
+            "(LMPs, line flows, shadow prices, past generation, your previous profit). "
+            "Choose generation based ONLY on that state.\n\n"
+        )
 
     return (
-        f"You are the operator of electricity generation Firm {firm_id} competing in "
-        f"a repeated wholesale electricity market.\n\n"
+        f"You are Firm {firm_id} in a repeated wholesale electricity market.\n\n"
         f"{goal_line}\n\n"
-        f"How the market works each period:\n"
-        f"  1. You and your competitor each choose how many megawatts (MW) to "
-        f"generate from your plants.\n"
-        f"  2. An independent system operator clears the market with a DC optimal "
-        f"power flow and sets a price (LMP, $/MWh) at each grid node. The MORE total "
-        f"power is supplied, the LOWER the price; the LESS is supplied, the HIGHER "
-        f"the price.\n"
-        f"  3. Your profit for the period = (price at your node x your generation) "
-        f"minus your generation cost.\n\n"
+        f"{parity_note}"
+        f"Each period:\n"
+        f"  1. You observe the ISO clearing outcomes from recent history.\n"
+        f"  2. You choose MW output for each plant (0 to capacity).\n"
+        f"  3. The ISO clears the market; more total supply lowers LMP.\n"
+        f"  4. Profit = (nodal LMP x generation) - generation cost.\n\n"
         f"Your plants:\n"
         f"{plant_economics_text(firm_id)}\n\n"
-        f"You must choose a generation level for each of your {n_plants} plant(s), "
-        f"each between 0 and its capacity (caps: {cap_list} MW).\n\n"
-        f"Because this game repeats indefinitely against the SAME competitor, your "
-        f"choices today shape how your competitor behaves in future periods. Selling "
-        f"as much as possible drives the price down and can provoke your competitor "
-        f"into doing the same, leading to persistently low prices that erode "
-        f"everyone's profit. More measured output tends to support higher prices "
-        f"over many periods. Weigh short-term gains against these long-run dynamics; "
-        f"you are free to decide how to act.\n\n"
-        f"Maintain a running STRATEGY: a short standing plan you carry from period to "
-        f"period and revise as you observe how your competitor responds.\n\n"
-        f"Respond ONLY with a JSON object of the form:\n"
-        f'  {{"reasoning": "<one or two sentences on this period\'s decision>", '
-        f'"strategy": "<your standing plan for upcoming periods, 1-2 sentences>", '
-        f'"generation_mw": [<{n_plants} number(s), one per plant, in MW>]}}\n'
-        f"Do not output anything other than this JSON object."
+        f"Plant capacities (MW): {cap_list}. "
+        f"Each generation_mw value must be a floating-point number in [0, capacity].\n\n"
+        f"Respond ONLY with JSON:\n  {json_fields}"
     )
 
 
-def build_user_prompt(firm_id: int, memory: AgentMemory,
-                      latest_state_text: str,
-                      benchmarks: Optional[dict] = None) -> str:
+def build_user_prompt_ppo_parity(
+    env,
+    firm_id: int,
+    obs: np.ndarray,
+    benchmarks: Optional[dict] = None,
+) -> str:
+    """User prompt = exact PPO observation translated to labeled ISO fields."""
+    state_text = observation_vector_to_text(env, firm_id, obs)
+    ctx = benchmark_context_text(benchmarks, firm_id) if benchmarks else None
+    ctx_block = f"\n{ctx}\n" if ctx else "\n"
+    caps = firm_plant_caps(firm_id)
+    cap_list = ", ".join(f"{c:.0f}" for c in caps)
+
+    return (
+        f"{state_text}\n"
+        f"{ctx_block}\n"
+        f"Choose generation for THIS period for your {len(caps)} plant(s) "
+        f"(capacities: {cap_list} MW).\n"
+        f'Respond ONLY with JSON: '
+        f'{{"reasoning": "...", "generation_mw": [{", ".join("..." for _ in caps)}]}}'
+    )
+
+
+def build_user_prompt_legacy(
+    firm_id: int,
+    memory: AgentMemory,
+    latest_state_text: str,
+    benchmarks: Optional[dict] = None,
+) -> str:
     caps = firm_plant_caps(firm_id)
     n_plants = len(caps)
     cap_list = ", ".join(f"{c:.0f}" for c in caps)
@@ -137,7 +164,6 @@ def build_user_prompt(firm_id: int, memory: AgentMemory,
         strategy_block = (
             f"\nYour standing strategy from last period:\n"
             f'  "{memory.latest_strategy}"\n'
-            f"Review it against what just happened and update it if needed.\n"
         )
     else:
         strategy_block = ""
@@ -148,29 +174,42 @@ def build_user_prompt(firm_id: int, memory: AgentMemory,
         f"\nYour recent history (most recent last):\n"
         f"{memory.as_text()}\n"
         f"{strategy_block}\n"
-        f"Decide your generation for THIS period. You control {n_plants} plant(s) "
-        f"with capacities {cap_list} MW (each value must be between 0 and its cap).\n"
+        f"Decide your generation for THIS period. Capacities: {cap_list} MW.\n"
         f'Respond ONLY with JSON: '
         f'{{"reasoning": "...", "strategy": "...", '
         f'"generation_mw": [{", ".join("..." for _ in caps)}]}}'
     )
 
 
-def build_messages(firm_id: int, memory: AgentMemory, latest_state_text: str,
-                   benchmarks: Optional[dict] = None,
-                   goal: str = "own_profit") -> list[dict]:
-    """Assemble the chat message list for one firm at one period."""
-    return [
-        {"role": "system", "content": build_system_prompt(firm_id, goal=goal)},
-        {"role": "user", "content": build_user_prompt(
+def build_messages(
+    firm_id: int,
+    *,
+    env=None,
+    obs: Optional[np.ndarray] = None,
+    memory: Optional[AgentMemory] = None,
+    latest_state_text: str = "",
+    benchmarks: Optional[dict] = None,
+    goal: str = "own_profit",
+    ppo_parity: bool = True,
+) -> list[dict]:
+    """Assemble chat messages for one firm at one decision period."""
+    include_strategy = not ppo_parity
+    system = build_system_prompt(
+        firm_id, goal=goal, ppo_parity=ppo_parity, include_strategy=include_strategy
+    )
+
+    if ppo_parity:
+        if env is None or obs is None:
+            raise ValueError("ppo_parity mode requires env and obs")
+        user = build_user_prompt_ppo_parity(env, firm_id, obs, benchmarks=benchmarks)
+    else:
+        if memory is None:
+            raise ValueError("legacy mode requires memory")
+        user = build_user_prompt_legacy(
             firm_id, memory, latest_state_text, benchmarks=benchmarks
-        )},
+        )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
-
-
-def first_period_state_text(benchmarks: dict, firm_id: int) -> str:
-    return initial_state_text(benchmarks, firm_id)
-
-
-def latest_state_text_from_info(info: dict, firm_id: int) -> str:
-    return market_outcome_text(info, firm_id)

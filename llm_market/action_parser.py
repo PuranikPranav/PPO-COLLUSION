@@ -17,25 +17,26 @@ import numpy as np
 from iso_market.market_env import FIRM_PLANT_IDX, PLANTS
 
 
-def action_json_schema(firm_id: int) -> dict:
+def action_json_schema(firm_id: int, *, include_strategy: bool = False) -> dict:
     """JSON schema for one firm's action (used for vLLM structured/guided decoding)."""
     n = len(FIRM_PLANT_IDX[firm_id])
+    props = {
+        "reasoning": {"type": "string"},
+        "generation_mw": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": n,
+            "maxItems": n,
+        },
+    }
+    required = ["reasoning", "generation_mw"]
+    if include_strategy:
+        props["strategy"] = {"type": "string"}
+        required.append("strategy")
     return {
         "type": "object",
-        "properties": {
-            "reasoning": {"type": "string"},
-            # A short standing plan the agent carries forward across periods. This is
-            # the LLM's only form of persistent "learning" (weights are frozen), so it
-            # is fed back into the next prompt to let a strategy accumulate over time.
-            "strategy": {"type": "string"},
-            "generation_mw": {
-                "type": "array",
-                "items": {"type": "number"},
-                "minItems": n,
-                "maxItems": n,
-            },
-        },
-        "required": ["reasoning", "strategy", "generation_mw"],
+        "properties": props,
+        "required": required,
         "additionalProperties": False,
     }
 

@@ -60,7 +60,6 @@ class _MockBackend:
             outputs.append(
                 json.dumps({
                     "reasoning": "[mock] heuristic output around target fraction.",
-                    "strategy": "[mock] hold output near a fixed fraction of capacity.",
                     "generation_mw": mw,
                 })
             )

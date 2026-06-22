@@ -51,11 +51,11 @@ from experiments.ppo import (
 )
 
 from llm_market.granite_engine import GraniteEngine, DEFAULT_MODEL
-from llm_market.prompt_builder import (
-    AgentMemory,
-    build_messages,
-    first_period_state_text,
-    latest_state_text_from_info,
+from llm_market.prompt_builder import AgentMemory, build_messages
+from llm_market.state_translator import (
+    competitive_default_mw,
+    initial_state_text,
+    market_outcome_text,
 )
 from llm_market.action_parser import parse_action, action_json_schema, firm_caps
 
@@ -66,81 +66,105 @@ def _firm_total_gen(gen_per_plant: dict, firm_id: int) -> float:
 
 def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
     """Run one repeated-game session; return a session dict in plot-compatible form."""
-    env.reset()
-    memories = {f: AgentMemory(window=args.history_window) for f in range(NUM_FIRMS)}
-    schemas = [action_json_schema(f) for f in range(NUM_FIRMS)]
+    obs = env.reset()
+    ppo_parity = args.ppo_parity
+    include_strategy = not ppo_parity
 
-    # Seed each firm's "latest state" text from the competitive baseline.
-    latest_state = {f: first_period_state_text(benchmarks, f) for f in range(NUM_FIRMS)}
-    last_actions = {f: 0.5 * firm_caps(f) for f in range(NUM_FIRMS)}
+    memories = None
+    latest_state = None
+    if not ppo_parity:
+        memories = {f: AgentMemory(window=args.history_window) for f in range(NUM_FIRMS)}
+        latest_state = {
+            f: initial_state_text(benchmarks, f) for f in range(NUM_FIRMS)
+        }
+
+    schemas = [
+        action_json_schema(f, include_strategy=include_strategy)
+        for f in range(NUM_FIRMS)
+    ]
+    last_actions = {
+        f: competitive_default_mw(env, f) for f in range(NUM_FIRMS)
+    }
 
     metrics = []
     delta_history = []
     parse_failures = 0
 
     for t in range(args.num_periods):
-        # ---- Steps 1-2: translate state + build per-agent prompts ----
-        batch_messages = [
-            build_messages(
-                f, memories[f], latest_state[f],
-                benchmarks=benchmarks, goal=args.goal,
-            )
-            for f in range(NUM_FIRMS)
-        ]
+        # ---- Build prompts from the SAME obs vector PPO agents see ----
+        if ppo_parity:
+            batch_messages = [
+                build_messages(
+                    f,
+                    env=env,
+                    obs=obs[f],
+                    benchmarks=benchmarks,
+                    goal=args.goal,
+                    ppo_parity=True,
+                )
+                for f in range(NUM_FIRMS)
+            ]
+        else:
+            batch_messages = [
+                build_messages(
+                    f,
+                    memory=memories[f],
+                    latest_state_text=latest_state[f],
+                    benchmarks=benchmarks,
+                    goal=args.goal,
+                    ppo_parity=False,
+                )
+                for f in range(NUM_FIRMS)
+            ]
 
-        # ---- Step 3: ONE batched LLM call (one prompt per agent) ----
+        # ---- ONE batched LLM call (one prompt per agent) ----
         completions = engine.chat(batch_messages, schemas=schemas)
 
-        # ---- Step 4: parse actions ----
+        # ---- Parse JSON -> MW actions (float, clipped to capacity) ----
         actions_mw = {}
-        reasonings = {}
-        strategies = {}
         for f in range(NUM_FIRMS):
             parsed = parse_action(
                 completions[f], f, default_mw=last_actions[f]
             )
             actions_mw[f] = parsed["mw"]
-            reasonings[f] = parsed["reasoning"]
-            strategies[f] = parsed["strategy"]
-            # Carry the agent's own strategy note forward into its next prompt.
-            memories[f].set_strategy(parsed["strategy"])
+            if not ppo_parity and memories is not None:
+                memories[f].set_strategy(parsed.get("strategy", ""))
             if not parsed["parse_ok"]:
                 parse_failures += 1
         last_actions = {f: actions_mw[f].copy() for f in range(NUM_FIRMS)}
 
-        # ---- Clear the market ----
+        # ---- ISO clears the market; env updates obs_history like PPO ----
         obs, rewards, done, info = env.step(actions_mw)
         if done and info.get("error"):
-            env.reset()
+            obs = env.reset()
             continue
 
         gen = info.get("gen", {})
         avg_lmp = float(info.get("avg_lmp", 0.0))
         lmps = np.asarray(info["lmps"], dtype=float)
 
-        # Per-firm profit this period (= env reward), and combined Δ.
         per_firm_profit = {f: float(rewards[f]) for f in range(NUM_FIRMS)}
         delta_now = compute_combined_delta(per_firm_profit, pi_nash, pi_mono)
         delta_history.append(delta_now)
 
-        # ---- Update each firm's memory ----
-        for f in range(NUM_FIRMS):
-            own_plant_gen = [gen.get(pidx, 0.0) for pidx in FIRM_PLANT_IDX[f]]
-            own_total = _firm_total_gen(gen, f)
-            rival_total = sum(
-                _firm_total_gen(gen, g) for g in range(NUM_FIRMS) if g != f
-            )
-            nodes = sorted({PLANTS[pidx]["node"] for pidx in FIRM_PLANT_IDX[f]})
-            own_price = float(np.mean([lmps[n] for n in nodes]))
-            memories[f].add(
-                period=t,
-                own_gen_total=own_total,
-                own_plant_gen=own_plant_gen,
-                price=own_price,
-                profit=per_firm_profit[f],
-                rival_total=rival_total,
-            )
-            latest_state[f] = latest_state_text_from_info(info, f)
+        if not ppo_parity and memories is not None:
+            for f in range(NUM_FIRMS):
+                own_plant_gen = [gen.get(pidx, 0.0) for pidx in FIRM_PLANT_IDX[f]]
+                own_total = _firm_total_gen(gen, f)
+                rival_total = sum(
+                    _firm_total_gen(gen, g) for g in range(NUM_FIRMS) if g != f
+                )
+                nodes = sorted({PLANTS[pidx]["node"] for pidx in FIRM_PLANT_IDX[f]})
+                own_price = float(np.mean([lmps[n] for n in nodes]))
+                memories[f].add(
+                    period=t,
+                    own_gen_total=own_total,
+                    own_plant_gen=own_plant_gen,
+                    price=own_price,
+                    profit=per_firm_profit[f],
+                    rival_total=rival_total,
+                )
+                latest_state[f] = market_outcome_text(info, f)
 
         # ---- Log a plot_results-compatible row ----
         row = {
@@ -173,10 +197,15 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
         "final_delta_combined": final_delta,
         "metrics": metrics,
         "parse_failures": parse_failures,
-        "final_strategies": {f: memories[f].latest_strategy for f in range(NUM_FIRMS)},
-        "final_cumulative_profit": {
-            f: memories[f].cumulative_profit for f in range(NUM_FIRMS)
-        },
+        "ppo_parity": ppo_parity,
+        "final_strategies": (
+            {f: memories[f].latest_strategy for f in range(NUM_FIRMS)}
+            if memories is not None else {}
+        ),
+        "final_cumulative_profit": (
+            {f: memories[f].cumulative_profit for f in range(NUM_FIRMS)}
+            if memories is not None else {}
+        ),
         # empty placeholders so plot_results' optional panels degrade gracefully
         "limit_strategy": {},
         "deviation_experiment": {},
@@ -228,7 +257,7 @@ def main(args):
 
     config = vars(args).copy()
     config["benchmarks"] = benchmarks
-    config["agent_type"] = "llm_granite"
+    config["agent_type"] = "llm_granite_ppo_parity" if args.ppo_parity else "llm_granite"
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
@@ -302,7 +331,11 @@ def parse_args():
     p.add_argument("--num-periods", type=int, default=60,
                    help="Decision periods per session (repeated interactions).")
     p.add_argument("--history-window", type=int, default=10,
-                   help="Sliding-window memory length (periods shown in the prompt).")
+                   help="Legacy mode only: sliding-window memory in the prompt.")
+    p.add_argument("--ppo-parity", action="store_true", default=True,
+                   help="Use the exact PPO observation vector (default).")
+    p.add_argument("--legacy-memory", dest="ppo_parity", action="store_false",
+                   help="Use older narrative memory + strategy note instead of PPO obs.")
     p.add_argument("--goal", type=str, default="own_profit",
                    choices=("own_profit", "joint_profit"))
 
