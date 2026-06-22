@@ -36,12 +36,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iso_market.market_env import (
-    ElectricityMarketEnv,
-    NUM_FIRMS,
-    FIRM_PLANT_IDX,
-    PLANTS,
-)
+from iso_market.market_env import ElectricityMarketEnv, NUM_FIRMS
 from experiments.ppo import (
     compute_competitive_benchmark,
     compute_cournot_nash_benchmark,
@@ -51,120 +46,81 @@ from experiments.ppo import (
 )
 
 from llm_market.granite_engine import GraniteEngine, DEFAULT_MODEL
-from llm_market.prompt_builder import AgentMemory, build_messages
-from llm_market.state_translator import (
-    competitive_default_mw,
-    initial_state_text,
-    market_outcome_text,
+from llm_market.state_translator import competitive_default_mw
+from llm_market.action_parser import action_json_schema
+from llm_market.llm_dynamics import (
+    firm_total_gen as _firm_total_gen,
+    fresh_memories,
+    initial_latest_state,
+    select_actions_llm,
+    update_memories,
+    run_deviation_experiment_llm,
+    compute_limit_strategy_llm,
 )
-from llm_market.action_parser import parse_action, action_json_schema, firm_caps
 
 
-def _firm_total_gen(gen_per_plant: dict, firm_id: int) -> float:
-    return float(sum(gen_per_plant.get(pidx, 0.0) for pidx in FIRM_PLANT_IDX[firm_id]))
+def _stationarity(delta_history, window_frac=0.25, threshold=0.05):
+    """Flag whether the *repeated-game dynamics* have settled (not weight training).
+
+    Granite is frozen — there is no gradient training to converge. This instead
+    reports whether Δ has stabilised: std of Δ over the final ``window_frac`` of
+    periods is below ``threshold``. Reported alongside a PPO-compatible ``converged``
+    flag so the existing plots/tables keep working.
+    """
+    if len(delta_history) < 4:
+        return False, float("nan")
+    w = max(2, int(len(delta_history) * window_frac))
+    tail = np.asarray(delta_history[-w:], dtype=float)
+    std = float(np.std(tail))
+    return bool(std < threshold), std
 
 
 def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
     """Run one repeated-game session; return a session dict in plot-compatible form."""
+    base_seed = args.seed + 100003 * session_id  # distinct, reproducible per session
     obs = env.reset()
     ppo_parity = args.ppo_parity
     include_strategy = not ppo_parity
 
-    memories = None
-    latest_state = None
-    if not ppo_parity:
-        memories = {f: AgentMemory(window=args.history_window) for f in range(NUM_FIRMS)}
-        latest_state = {
-            f: initial_state_text(benchmarks, f) for f in range(NUM_FIRMS)
-        }
+    memories = None if ppo_parity else fresh_memories(args)
+    latest_state = None if ppo_parity else initial_latest_state(benchmarks)
 
     schemas = [
         action_json_schema(f, include_strategy=include_strategy)
         for f in range(NUM_FIRMS)
     ]
-    last_actions = {
-        f: competitive_default_mw(env, f) for f in range(NUM_FIRMS)
-    }
+    last_actions = {f: competitive_default_mw(env, f) for f in range(NUM_FIRMS)}
 
     metrics = []
     delta_history = []
     parse_failures = 0
 
     for t in range(args.num_periods):
-        # ---- Build prompts from the SAME obs vector PPO agents see ----
-        if ppo_parity:
-            batch_messages = [
-                build_messages(
-                    f,
-                    env=env,
-                    obs=obs[f],
-                    benchmarks=benchmarks,
-                    goal=args.goal,
-                    ppo_parity=True,
-                )
-                for f in range(NUM_FIRMS)
-            ]
-        else:
-            batch_messages = [
-                build_messages(
-                    f,
-                    memory=memories[f],
-                    latest_state_text=latest_state[f],
-                    benchmarks=benchmarks,
-                    goal=args.goal,
-                    ppo_parity=False,
-                )
-                for f in range(NUM_FIRMS)
-            ]
-
-        # ---- ONE batched LLM call (one prompt per agent) ----
-        completions = engine.chat(batch_messages, schemas=schemas)
-
-        # ---- Parse JSON -> MW actions (float, clipped to capacity) ----
-        actions_mw = {}
+        # Build prompts -> ONE batched LLM call -> parse JSON -> MW per firm.
+        actions_mw, parsed_by_firm = select_actions_llm(
+            engine, env, obs, benchmarks, args, schemas, last_actions,
+            memories=memories, latest_state=latest_state, seed=base_seed + t,
+        )
         for f in range(NUM_FIRMS):
-            parsed = parse_action(
-                completions[f], f, default_mw=last_actions[f]
-            )
-            actions_mw[f] = parsed["mw"]
-            if not ppo_parity and memories is not None:
-                memories[f].set_strategy(parsed.get("strategy", ""))
-            if not parsed["parse_ok"]:
+            if memories is not None:
+                memories[f].set_strategy(parsed_by_firm[f].get("strategy", ""))
+            if not parsed_by_firm[f]["parse_ok"]:
                 parse_failures += 1
         last_actions = {f: actions_mw[f].copy() for f in range(NUM_FIRMS)}
 
-        # ---- ISO clears the market; env updates obs_history like PPO ----
+        # ISO clears the market; env rolls obs_history like PPO; memory is updated.
         obs, rewards, done, info = env.step(actions_mw)
         if done and info.get("error"):
             obs = env.reset()
             continue
+        update_memories(memories, latest_state, info, t)
 
         gen = info.get("gen", {})
         avg_lmp = float(info.get("avg_lmp", 0.0))
-        lmps = np.asarray(info["lmps"], dtype=float)
 
         per_firm_profit = {f: float(rewards[f]) for f in range(NUM_FIRMS)}
         delta_now = compute_combined_delta(per_firm_profit, pi_nash, pi_mono)
         delta_history.append(delta_now)
-
-        if not ppo_parity and memories is not None:
-            for f in range(NUM_FIRMS):
-                own_plant_gen = [gen.get(pidx, 0.0) for pidx in FIRM_PLANT_IDX[f]]
-                own_total = _firm_total_gen(gen, f)
-                rival_total = sum(
-                    _firm_total_gen(gen, g) for g in range(NUM_FIRMS) if g != f
-                )
-                nodes = sorted({PLANTS[pidx]["node"] for pidx in FIRM_PLANT_IDX[f]})
-                own_price = float(np.mean([lmps[n] for n in nodes]))
-                memories[f].add(
-                    period=t,
-                    own_gen_total=own_total,
-                    own_plant_gen=own_plant_gen,
-                    price=own_price,
-                    profit=per_firm_profit[f],
-                    rival_total=rival_total,
-                )
-                latest_state[f] = market_outcome_text(info, f)
 
         # ---- Log a plot_results-compatible row ----
         row = {
@@ -189,10 +145,35 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
 
     tail = delta_history[len(delta_history) // 2:] or delta_history or [0.0]
     final_delta = float(np.mean(tail))
+    converged, conv_std = _stationarity(delta_history)
+
+    # ---- Post-hoc analysis (mirrors ppo.train_session) ----------------------
+    # Punishment / impulse-response: the figure that demonstrates retaliation.
+    run_dev = (not args.no_deviation) and (session_id < args.deviation_max_sessions)
+    deviation_exp = (
+        run_deviation_experiment_llm(
+            env, engine, benchmarks, args, schemas, base_seed + 500000,
+            deviation_frac=args.deviation_frac,
+            warmup=args.deviation_warmup,
+            horizon=args.deviation_horizon,
+        )
+        if run_dev else {}
+    )
+    # Reaction function (collusive limit strategy); parity mode only.
+    limit_strategy = (
+        compute_limit_strategy_llm(
+            env, engine, benchmarks, args, schemas, base_seed + 900000,
+            num_points=args.limit_points,
+        )
+        if (args.limit_strategy and session_id < args.deviation_max_sessions)
+        else {}
+    )
+
     return {
         "session_id": session_id,
-        "seed": args.seed + session_id,
-        "converged": False,
+        "seed": base_seed,
+        "converged": converged,
+        "convergence_std": conv_std,
         "convergence_step": args.num_periods,
         "final_delta_combined": final_delta,
         "metrics": metrics,
@@ -206,9 +187,8 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
             {f: memories[f].cumulative_profit for f in range(NUM_FIRMS)}
             if memories is not None else {}
         ),
-        # empty placeholders so plot_results' optional panels degrade gracefully
-        "limit_strategy": {},
-        "deviation_experiment": {},
+        "limit_strategy": limit_strategy,
+        "deviation_experiment": deviation_exp,
     }
 
 
@@ -262,9 +242,10 @@ def main(args):
         json.dump(config, f, indent=2)
 
     all_final_delta = []
+    all_converged = []
     total_parse_fail = 0
     for s in range(args.num_sessions):
-        print(f"\n--- Session {s + 1}/{args.num_sessions} (seed={args.seed + s}) ---")
+        print(f"\n--- Session {s + 1}/{args.num_sessions} (seed={args.seed + 100003 * s}) ---")
         result = run_session(env, engine, benchmarks, args, s, pi_nash, pi_mono)
 
         sess_dir = out_dir / "sessions" / f"session_{s}"
@@ -273,9 +254,11 @@ def main(args):
             json.dump(result, f, indent=2)
 
         all_final_delta.append(result["final_delta_combined"])
+        all_converged.append(bool(result.get("converged", False)))
         total_parse_fail += result["parse_failures"]
         print(
-            f"  Final Δ_combined={result['final_delta_combined']:.3f} | "
+            f"  Final Δ_combined={result['final_delta_combined']:.3f} "
+            f"(stationary={'yes' if result.get('converged') else 'no'}) | "
             f"parse failures={result['parse_failures']}"
         )
 
@@ -284,8 +267,12 @@ def main(args):
         "num_periods": args.num_periods,
         "backend": args.backend,
         "model": args.model,
+        "agent_type": config.get("agent_type"),
+        "ppo_parity": args.ppo_parity,
+        "history_len": args.history_len,
         "delta_combined_mean": float(np.mean(all_final_delta)) if all_final_delta else 0.0,
         "delta_combined_std": float(np.std(all_final_delta)) if all_final_delta else 0.0,
+        "stationary_fraction": float(np.mean(all_converged)) if all_converged else 0.0,
         "total_parse_failures": total_parse_fail,
     }
     with open(out_dir / "aggregate.json", "w") as f:
@@ -298,6 +285,7 @@ def main(args):
         f"± {aggregate['delta_combined_std']:.3f}  "
         f"({args.num_sessions} sessions x {args.num_periods} periods)"
     )
+    print(f"  Stationary sessions: {aggregate['stationary_fraction'] * 100:.0f}%")
     print(f"  Parse failures: {total_parse_fail}")
     print(
         "\nPlot with:\n"
@@ -338,6 +326,23 @@ def parse_args():
                    help="Use older narrative memory + strategy note instead of PPO obs.")
     p.add_argument("--goal", type=str, default="own_profit",
                    choices=("own_profit", "joint_profit"))
+
+    # Post-hoc analysis: punishment / impulse-response + limit strategy
+    # (analogues of experiments/ppo.run_deviation_experiment / compute_limit_strategy).
+    p.add_argument("--no-deviation", action="store_true", default=False,
+                   help="Skip the deviation/punishment experiment (saves GPU time).")
+    p.add_argument("--deviation-frac", type=float, default=0.2,
+                   help="One-period forced over-production (fraction above the chosen output).")
+    p.add_argument("--deviation-warmup", type=int, default=8,
+                   help="Periods of normal play before the forced deviation.")
+    p.add_argument("--deviation-horizon", type=int, default=20,
+                   help="Periods of normal play observed after the deviation (the punishment window).")
+    p.add_argument("--deviation-max-sessions", type=int, default=5,
+                   help="Run the deviation/limit experiments only on the first N sessions.")
+    p.add_argument("--limit-strategy", action="store_true", default=False,
+                   help="Also sweep avg-LMP to record each firm's reaction function (parity mode only).")
+    p.add_argument("--limit-points", type=int, default=12,
+                   help="Grid points for the limit-strategy sweep.")
 
     # Environment (kept consistent with the PPO runs)
     p.add_argument("--history-len", type=int, default=1)

@@ -32,17 +32,32 @@ export PYTHONUNBUFFERED=1
 MODEL="${MODEL:-ibm-granite/granite-3.3-8b-instruct}"
 BACKEND="${BACKEND:-vllm}"
 SESSIONS="${SESSIONS:-20}"
-PERIODS="${PERIODS:-300}"
-HISTORY_LEN="${HISTORY_LEN:-1}"       # PPO H=1 → obs_dim=19 (1 × 19 features)
-WINDOW="${WINDOW:-1}"                 # legacy-memory mode only
+PERIODS="${PERIODS:-300}"           # rounds of the repeated game (LLM x-axis is rounds)
+#
+# MODE selects how the FROZEN model gets the memory it needs to (possibly) collude:
+#   memory  -> narrative sliding-window of joint history + carry-forward strategy note
+#              (the collusion TREATMENT; the model writes its strategy in words).
+#   parity  -> the strict 19xH observation vector; set HISTORY_LEN>1 (e.g. 8) so the
+#              obs itself carries a multi-period window (directly comparable to PPO H).
+#              HISTORY_LEN=1 here is the deliberately-memoryless BASELINE.
+MODE="${MODE:-memory}"
+HISTORY_LEN="${HISTORY_LEN:-8}"       # parity mode: obs_dim = 19 x HISTORY_LEN
+WINDOW="${WINDOW:-10}"                # memory mode: sliding-window depth in the prompt
+GOAL="${GOAL:-own_profit}"            # own_profit | joint_profit
 TP="${TP:-1}"                       # tensor-parallel GPUs
 QUANT="${QUANT:-}"                  # empty = bf16
 TEMPERATURE="${TEMPERATURE:-0.7}"
 MAXTOK="${MAXTOK:-256}"               # reasoning + generation JSON
 MAXLEN="${MAXLEN:-8192}"
 SEED="${SEED:-42}"
-OUTPUT_DIR="${OUTPUT_DIR:-results/llm_granite8/h1}"
-FIGURES_DIR="${FIGURES_DIR:-figures/llm_granite8}"
+# Punishment / impulse-response experiment (Calvano-style retaliation figure).
+DEV_FRAC="${DEV_FRAC:-0.2}"
+DEV_WARMUP="${DEV_WARMUP:-8}"
+DEV_HORIZON="${DEV_HORIZON:-20}"
+DEV_SESSIONS="${DEV_SESSIONS:-5}"     # run the deviation/limit experiments on the first N sessions
+LIMIT_STRATEGY="${LIMIT_STRATEGY:-0}" # 1 = also sweep the reaction function (parity mode only)
+OUTPUT_DIR="${OUTPUT_DIR:-results/llm_granite8/${MODE}}"
+FIGURES_DIR="${FIGURES_DIR:-figures/llm_granite8/${MODE}}"
 
 module purge
 module load cuda 2>/dev/null || true
@@ -134,10 +149,18 @@ mkdir -p "$HF_HOME"
 QUANT_ARG=""
 [ -n "$QUANT" ] && QUANT_ARG="--quantization $QUANT"
 
+# memory mode uses narrative memory (--legacy-memory); parity is the default.
+MODE_ARG="--ppo-parity"
+[ "$MODE" = "memory" ] && MODE_ARG="--legacy-memory"
+LIMIT_ARG=""
+[ "$LIMIT_STRATEGY" = "1" ] && LIMIT_ARG="--limit-strategy"
+
 echo "####################################################################"
 echo "#  IBM Granite LLM agents — electricity market"
 echo "#  model=${MODEL} backend=${BACKEND} TP=${TP} quant='${QUANT}'"
-echo "#  sessions=${SESSIONS} periods=${PERIODS} history_len=${HISTORY_LEN} (obs_dim=$((HISTORY_LEN * 19)))"
+echo "#  mode=${MODE} goal=${GOAL} sessions=${SESSIONS} periods=${PERIODS}"
+echo "#  history_len=${HISTORY_LEN} (parity obs_dim=$((HISTORY_LEN * 19))) window=${WINDOW} (memory)"
+echo "#  deviation: frac=${DEV_FRAC} warmup=${DEV_WARMUP} horizon=${DEV_HORIZON} on first ${DEV_SESSIONS} sessions"
 echo "#  GPU: ${CUDA_VISIBLE_DEVICES:-(Slurm-assigned)}  job=${SLURM_JOB_ID:-local}"
 echo "#  results -> ${OUTPUT_DIR}   HF_HOME=${HF_HOME}"
 echo "#  python=$(python --version 2>&1)  module=${PYTHON_MODULE:-none}"
@@ -151,18 +174,26 @@ python llm_market/run_llm_market.py \
     --num-periods "$PERIODS" \
     --history-len "$HISTORY_LEN" \
     --history-window "$WINDOW" \
-    --ppo-parity \
+    --goal "$GOAL" \
+    $MODE_ARG \
     --tensor-parallel-size "$TP" \
     $QUANT_ARG \
     --temperature "$TEMPERATURE" \
     --max-tokens "$MAXTOK" \
     --max-model-len "$MAXLEN" \
     --seed "$SEED" \
+    --deviation-frac "$DEV_FRAC" \
+    --deviation-warmup "$DEV_WARMUP" \
+    --deviation-horizon "$DEV_HORIZON" \
+    --deviation-max-sessions "$DEV_SESSIONS" \
+    $LIMIT_ARG \
     --output-dir "$OUTPUT_DIR"
 
 # Plot exactly like the PPO runs.
-python experiments/plot_results.py "$OUTPUT_DIR" --calvano-paper   --save "$FIGURES_DIR" || true
-python experiments/plot_results.py "$OUTPUT_DIR" --per-firm-profit --save "$FIGURES_DIR" || true
-python experiments/plot_results.py "$OUTPUT_DIR" --variance-funnel --save "$FIGURES_DIR" || true
+python experiments/plot_results.py "$OUTPUT_DIR" --calvano-paper       --save "$FIGURES_DIR" || true
+python experiments/plot_results.py "$OUTPUT_DIR" --per-firm-profit     --save "$FIGURES_DIR" || true
+python experiments/plot_results.py "$OUTPUT_DIR" --variance-funnel     --save "$FIGURES_DIR" || true
+# The punishment / retaliation figure (now populated for the LLM agents).
+python experiments/plot_results.py "$OUTPUT_DIR" --deviation-explainer --save "$FIGURES_DIR" || true
 
 echo "Done -> ${OUTPUT_DIR}"

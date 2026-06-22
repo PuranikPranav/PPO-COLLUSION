@@ -42,7 +42,11 @@ class _MockBackend:
         self.noise = noise
         self.rng = np.random.default_rng(seed)
 
-    def chat(self, batch_messages, schemas=None, **kwargs) -> list[str]:
+    def chat(self, batch_messages, schemas=None, seed=None, **kwargs) -> list[str]:
+        # A per-call seed (set per session/period by the driver) makes the mock
+        # backend's pseudo-agents vary across independent sessions, just like
+        # temperature-sampled vLLM. Without it every session is identical.
+        rng = np.random.default_rng(seed) if seed is not None else self.rng
         outputs = []
         for i, _msgs in enumerate(batch_messages):
             n = 1
@@ -52,7 +56,7 @@ class _MockBackend:
             # We emit plausible MW by assuming a generic 100 MW scale; the action
             # parser clips to the true capacity, so values are always valid.
             frac = np.clip(
-                self.target_fraction + self.rng.normal(0, self.noise, size=n),
+                self.target_fraction + rng.normal(0, self.noise, size=n),
                 0.05,
                 1.0,
             )
@@ -113,13 +117,13 @@ class _VLLMBackend:
             pass
         return None
 
-    def _sampling_params(self, schema: Optional[dict]):
+    def _sampling_params(self, schema: Optional[dict], seed: Optional[int] = None):
         from vllm import SamplingParams
 
         common = dict(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            seed=self.seed,
+            seed=self.seed if seed is None else int(seed),
         )
         if schema is None or self._struct_mode is None:
             return SamplingParams(**common)
@@ -142,9 +146,15 @@ class _VLLMBackend:
             return SamplingParams(**common)
         return SamplingParams(**common)
 
-    def chat(self, batch_messages, schemas=None, **kwargs) -> list[str]:
+    def chat(self, batch_messages, schemas=None, seed=None, **kwargs) -> list[str]:
         schemas = schemas or [None] * len(batch_messages)
-        sp_list = [self._sampling_params(s) for s in schemas]
+        # Give each prompt in the batch a distinct (but reproducible) seed so the two
+        # firms don't sample identically off a shared seed, and so each session/period
+        # differs when the driver passes a varying base seed.
+        sp_list = [
+            self._sampling_params(s, seed=None if seed is None else int(seed) + i)
+            for i, s in enumerate(schemas)
+        ]
         outs = self.llm.chat(messages=batch_messages, sampling_params=sp_list, use_tqdm=False)
         return [o.outputs[0].text for o in outs]
 
@@ -172,7 +182,9 @@ class _TransformersBackend:
         )
         self.model.eval()
 
-    def chat(self, batch_messages, schemas=None, **kwargs) -> list[str]:
+    def chat(self, batch_messages, schemas=None, seed=None, **kwargs) -> list[str]:
+        if seed is not None:
+            self.torch.manual_seed(int(seed))
         prompts = [
             self.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True
@@ -224,6 +236,16 @@ class GraniteEngine:
         else:
             raise ValueError(f"Unknown backend '{backend}'. Use mock|vllm|transformers.")
 
-    def chat(self, batch_messages: list, schemas: Optional[list] = None) -> list[str]:
-        """Run one batched inference. Returns one completion string per conversation."""
-        return self.backend.chat(batch_messages, schemas=schemas)
+    def chat(
+        self,
+        batch_messages: list,
+        schemas: Optional[list] = None,
+        seed: Optional[int] = None,
+    ) -> list[str]:
+        """Run one batched inference. Returns one completion string per conversation.
+
+        ``seed`` (optional) is set per session/period by the driver so independent
+        sessions are genuinely independent (real cross-session variance / error bars)
+        rather than identical re-runs off a single fixed engine seed.
+        """
+        return self.backend.chat(batch_messages, schemas=schemas, seed=seed)
