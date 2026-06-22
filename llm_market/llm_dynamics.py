@@ -58,20 +58,27 @@ def initial_latest_state(benchmarks):
     return {f: initial_state_text(benchmarks, f) for f in range(NUM_FIRMS)}
 
 
-def build_batch_messages(env, obs, benchmarks, args, memories, latest_state):
-    """One chat prompt per firm for the current state."""
+def build_batch_messages(
+    env, obs, benchmarks, args, memories, latest_state, last_actions=None
+):
+    """One chat prompt per firm for the current state.
+
+    ``last_actions`` (rival's most recent MW) drives the what-if profit table; pass
+    None to omit it (e.g. the synthetic limit-strategy sweep).
+    """
     if args.ppo_parity:
         return [
             build_messages(
                 f, env=env, obs=obs[f], benchmarks=benchmarks,
-                goal=args.goal, ppo_parity=True,
+                goal=args.goal, ppo_parity=True, last_actions=last_actions,
             )
             for f in range(NUM_FIRMS)
         ]
     return [
         build_messages(
-            f, memory=memories[f], latest_state_text=latest_state[f],
+            f, env=env, memory=memories[f], latest_state_text=latest_state[f],
             benchmarks=benchmarks, goal=args.goal, ppo_parity=False,
+            last_actions=last_actions,
         )
         for f in range(NUM_FIRMS)
     ]
@@ -86,7 +93,9 @@ def select_actions_llm(
     Returns (actions_mw, parsed_by_firm). ``parsed_by_firm[f]`` carries the raw
     reasoning/strategy text so callers can log qualitative evidence.
     """
-    batch = build_batch_messages(env, obs, benchmarks, args, memories, latest_state)
+    batch = build_batch_messages(
+        env, obs, benchmarks, args, memories, latest_state, last_actions=last_actions
+    )
     completions = engine.chat(batch, schemas=schemas, seed=seed)
 
     actions_mw, parsed_by_firm = {}, {}

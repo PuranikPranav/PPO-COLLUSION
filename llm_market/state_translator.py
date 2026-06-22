@@ -171,6 +171,79 @@ def observation_vector_to_text(env, firm_id: int, obs: np.ndarray) -> str:
     return header + "\n\n".join(blocks)
 
 
+def market_response_preview_text(
+    env, firm_id: int, last_actions: dict, num_points: int = 8
+) -> str:
+    """A 'what-if' profit table: hold the rival at its last output, vary YOUR total
+    output, and show the resulting price and YOUR profit at each level.
+
+    This is the one piece of information a frozen model otherwise lacks — the SHAPE
+    of its own profit curve. It is computed by re-clearing the market for each
+    candidate output (the same DC-OPF the ISO runs), so the numbers are the market's
+    real response, not a guess. The curve is hump-shaped: too little output and you
+    sell too few MW; too much and you crush the price. The peak is the best reply to
+    the rival's CURRENT output. Output is split across your plants in proportion to
+    capacity (an approximation — you may split differently).
+
+    Returns "" if ``last_actions`` is None (e.g. the synthetic limit-strategy sweep).
+    """
+    if last_actions is None:
+        return ""
+
+    own_idxs = FIRM_PLANT_IDX[firm_id]
+    own_caps = np.array([PLANTS[p]["cap"] for p in own_idxs], dtype=float)
+    own_total_cap = float(own_caps.sum())
+    grid = np.linspace(0.15 * own_total_cap, own_total_cap, num_points)
+
+    rows = []
+    for target_total in grid:
+        alloc = own_caps * (target_total / own_total_cap)
+        gen_per_node = np.zeros(NUM_NODES)
+        for fid, acts in last_actions.items():
+            idxs = FIRM_PLANT_IDX[fid]
+            use = alloc if fid == firm_id else np.asarray(acts, dtype=float)
+            for j, pidx in enumerate(idxs):
+                g = min(float(use[j]), PLANTS[pidx]["cap"])
+                gen_per_node[PLANTS[pidx]["node"]] += g
+        lmps, _d, _f, _s = env._clear_market(gen_per_node)
+        if lmps is None:
+            continue
+        profit = 0.0
+        for j, pidx in enumerate(own_idxs):
+            p = PLANTS[pidx]
+            g = min(float(alloc[j]), p["cap"])
+            profit += lmps[p["node"]] * g - p["mc"] * g - 0.5 * p["qc"] * g * g
+        own_price = float(np.mean([lmps[PLANTS[pidx]["node"]] for pidx in own_idxs]))
+        rows.append((float(target_total), own_price, float(profit)))
+
+    if not rows:
+        return ""
+
+    best = max(range(len(rows)), key=lambda i: rows[i][2])
+    rival_total = sum(
+        float(np.sum(last_actions[fid])) for fid in last_actions if fid != firm_id
+    )
+
+    lines = [
+        f"WHAT-IF PROFIT TABLE (assumes the rival holds ~{rival_total:.0f} MW, its "
+        f"most recent output):",
+    ]
+    for i, (tot, price, profit) in enumerate(rows):
+        mark = "   <-- your best reply (peak profit)" if i == best else ""
+        lines.append(
+            f"  produce ~{tot:6.0f} MW  ->  price ~${price:5.1f}/MWh  ->  "
+            f"your profit ~${profit:8.0f}{mark}"
+        )
+    lines.append(
+        "  Read the shape: profit rises, peaks, then falls. The peak is your best "
+        "reply to the rival RIGHT NOW. If the rival cuts output, every row's price "
+        "and your profit go UP; if it floods, they go DOWN. Because the game repeats "
+        "forever, restraining a little BELOW the peak — when the rival restrains too "
+        "— keeps the price higher and earns BOTH of you more, round after round."
+    )
+    return "\n".join(lines)
+
+
 def benchmark_context_text(benchmarks: dict, firm_id: int) -> Optional[str]:
     """Optional orientation: rough price range (competitive to Nash only)."""
     comp = benchmarks.get("competitive", {})

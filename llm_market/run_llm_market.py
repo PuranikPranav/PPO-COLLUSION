@@ -314,7 +314,9 @@ def parse_args():
                    choices=("mock", "vllm", "transformers"),
                    help="mock = no GPU (pipeline test); vllm = A100 batched; transformers = HF fallback.")
     p.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--temperature", type=float, default=0.4,
+                   help="Lower = steadier round-to-round choices (less bounce around "
+                        "the profit peak); keep >0 for cross-session variance.")
     p.add_argument("--max-tokens", type=int, default=512,
                    help="Token budget per response; needs headroom for the reasoning field.")
     p.add_argument("--max-model-len", type=int, default=8192)

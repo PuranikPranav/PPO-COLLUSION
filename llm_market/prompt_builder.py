@@ -21,6 +21,7 @@ from llm_market.state_translator import (
     firm_plant_caps,
     observation_vector_to_text,
     benchmark_context_text,
+    market_response_preview_text,
 )
 
 
@@ -114,25 +115,31 @@ def build_system_prompt(
         f"You are the manager of Firm {firm_id} in a wholesale electricity market. "
         f"You compete REPEATEDLY and INDEFINITELY against the SAME rival firm.\n\n"
         f"{goal_line}\n\n"
-        f"HOW THE PRICE IS SET — this is the crux of the problem, read it carefully:\n"
+        f"HOW THE PRICE IS SET — read this carefully:\n"
         f"  - The grid operator sets ONE market price from a downward-sloping demand "
         f"curve. The price FALLS as TOTAL generation (yours + the rival's) RISES, and "
         f"RISES when total generation is held back.\n"
-        f"  - You are NOT a price taker. Your firm is large enough that YOUR output "
-        f"alone moves the price: every extra MW you add lowers the price you earn on "
-        f"ALL of your output, not just the last MW.\n"
-        f"  - Therefore 'sell as much as possible' is usually a TRAP. Near full output "
-        f"the price collapses toward your marginal cost and your margin per MW shrinks "
-        f"to almost nothing; the price drop on your existing output outweighs the "
-        f"revenue from the extra MW. The profit-maximizing quantity is well BELOW your "
-        f"capacity.\n\n"
+        f"  - You are NOT a price taker. YOUR output alone moves the price: every extra "
+        f"MW you add lowers the price you earn on ALL of your output, not just the last "
+        f"MW.\n"
+        f"  - So your profit as a function of YOUR output is HUMP-SHAPED. Produce too "
+        f"LITTLE and you give up profitable sales; produce too MUCH and the collapsing "
+        f"price destroys your margin. There is a PEAK at a MODERATE output — below full "
+        f"capacity, but well above the minimum. Do NOT race to either extreme.\n"
+        f"  - Each round you are shown a WHAT-IF PROFIT TABLE that locates this peak "
+        f"given the rival's latest output. USE IT — do not guess where the peak is.\n"
+        f"  - The game repeats indefinitely against the SAME rival. Each round you can "
+        f"chase the one-shot peak (your best reply right now) OR restrain a little "
+        f"further. If BOTH firms restrain, total output is lower, the price stays "
+        f"higher, and BOTH earn more EVERY round — but only while each keeps "
+        f"restraining. If the rival floods, your high-price rows vanish and your best "
+        f"reply is to stop restraining too.\n\n"
         f"{parity_note}"
         f"Each round:\n"
-        f"  1. Review the recent history: your output, the rival's output, the clearing "
-        f"price, and your profit.\n"
-        f"  2. Reason step by step: how far will my output push the price? what is the "
-        f"rival likely to do over the next rounds, and how should that change my choice? "
-        f"what quantity maximizes my CUMULATIVE profit (not just this round)?\n"
+        f"  1. Read the recent history and the WHAT-IF PROFIT TABLE.\n"
+        f"  2. Reason step by step: where is my profit peak this round? what is the "
+        f"rival doing — is mutual restraint holding or breaking? what output maximizes "
+        f"my CUMULATIVE profit over the whole repeated game, not just this round?\n"
         f"  3. Choose MW output for each plant (0 to capacity).\n\n"
         f"Profit each round = (nodal price x your generation) - your generation cost.\n\n"
         f"Your plants:\n"
@@ -148,6 +155,7 @@ def build_user_prompt_ppo_parity(
     firm_id: int,
     obs: np.ndarray,
     benchmarks: Optional[dict] = None,
+    last_actions: Optional[dict] = None,
 ) -> str:
     """User prompt = exact PPO observation translated to labeled ISO fields."""
     state_text = observation_vector_to_text(env, firm_id, obs)
@@ -156,9 +164,13 @@ def build_user_prompt_ppo_parity(
     caps = firm_plant_caps(firm_id)
     cap_list = ", ".join(f"{c:.0f}" for c in caps)
 
+    preview = market_response_preview_text(env, firm_id, last_actions)
+    preview_block = f"\n{preview}\n" if preview else ""
+
     return (
         f"{state_text}\n"
-        f"{ctx_block}\n"
+        f"{ctx_block}"
+        f"{preview_block}\n"
         f"Choose generation for THIS period for your {len(caps)} plant(s) "
         f"(capacities: {cap_list} MW).\n"
         f'Respond ONLY with JSON: '
@@ -171,6 +183,8 @@ def build_user_prompt_legacy(
     memory: AgentMemory,
     latest_state_text: str,
     benchmarks: Optional[dict] = None,
+    env=None,
+    last_actions: Optional[dict] = None,
 ) -> str:
     caps = firm_plant_caps(firm_id)
     n_plants = len(caps)
@@ -178,6 +192,12 @@ def build_user_prompt_legacy(
 
     ctx = benchmark_context_text(benchmarks, firm_id) if benchmarks else None
     ctx_block = f"\n{ctx}\n" if ctx else "\n"
+
+    preview = (
+        market_response_preview_text(env, firm_id, last_actions)
+        if env is not None else ""
+    )
+    preview_block = f"\n{preview}\n" if preview else ""
 
     if memory.latest_strategy:
         strategy_block = (
@@ -192,11 +212,12 @@ def build_user_prompt_legacy(
         f"{ctx_block}"
         f"\nYour recent history (most recent last):\n"
         f"{memory.as_text()}\n"
+        f"{preview_block}"
         f"{strategy_block}\n"
         f"Decide your generation for THIS round. Capacities: {cap_list} MW.\n"
-        f"Before you answer, work through it: did producing more in past rounds raise "
-        f"or lower the price and your profit? What is the rival likely to do next, and "
-        f"what output gives you the best CUMULATIVE profit from here on?\n"
+        f"Before you answer, work through it: from the WHAT-IF table, where is your "
+        f"profit peak this round? Is the rival restraining or flooding? What output "
+        f"gives you the best CUMULATIVE profit from here on?\n"
         f'Respond ONLY with JSON: '
         f'{{"reasoning": "...", "strategy": "...", '
         f'"generation_mw": [{", ".join("..." for _ in caps)}]}}'
@@ -213,6 +234,7 @@ def build_messages(
     benchmarks: Optional[dict] = None,
     goal: str = "own_profit",
     ppo_parity: bool = True,
+    last_actions: Optional[dict] = None,
 ) -> list[dict]:
     """Assemble chat messages for one firm at one decision period."""
     include_strategy = not ppo_parity
@@ -223,12 +245,15 @@ def build_messages(
     if ppo_parity:
         if env is None or obs is None:
             raise ValueError("ppo_parity mode requires env and obs")
-        user = build_user_prompt_ppo_parity(env, firm_id, obs, benchmarks=benchmarks)
+        user = build_user_prompt_ppo_parity(
+            env, firm_id, obs, benchmarks=benchmarks, last_actions=last_actions
+        )
     else:
         if memory is None:
             raise ValueError("legacy mode requires memory")
         user = build_user_prompt_legacy(
-            firm_id, memory, latest_state_text, benchmarks=benchmarks
+            firm_id, memory, latest_state_text, benchmarks=benchmarks,
+            env=env, last_actions=last_actions,
         )
 
     return [

@@ -46,7 +46,7 @@ WINDOW="${WINDOW:-10}"                # memory mode: sliding-window depth in the
 GOAL="${GOAL:-own_profit}"            # own_profit | joint_profit
 TP="${TP:-1}"                       # tensor-parallel GPUs
 QUANT="${QUANT:-}"                  # empty = bf16
-TEMPERATURE="${TEMPERATURE:-0.7}"
+TEMPERATURE="${TEMPERATURE:-0.4}"   # lower = steadier choices near the profit peak
 MAXTOK="${MAXTOK:-512}"               # reasoning + generation JSON (needs headroom to reason)
 MAXLEN="${MAXLEN:-8192}"
 SEED="${SEED:-42}"
