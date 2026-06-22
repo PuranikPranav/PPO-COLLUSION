@@ -34,7 +34,7 @@ MODEL="${MODEL:-ibm-granite/granite-4.1-8b-instruct}"
 BACKEND="${BACKEND:-vllm}"
 SESSIONS="${SESSIONS:-20}"
 PERIODS="${PERIODS:-300}"
-WINDOW="${WINDOW:-10}"
+WINDOW="${WINDOW:-1}"               # last-N periods in the prompt; 1 mimics PPO H=1
 TP="${TP:-1}"                       # tensor-parallel GPUs (set 2 for the 30B model)
 QUANT="${QUANT:-}"                  # empty = bf16 (no quantization); 'fp8' only for big models
 TEMPERATURE="${TEMPERATURE:-0.7}"
