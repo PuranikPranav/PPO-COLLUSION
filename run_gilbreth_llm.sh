@@ -46,8 +46,16 @@ FIGURES_DIR="${FIGURES_DIR:-figures/llm_granite8}"
 
 module purge
 module load cuda 2>/dev/null || true
-if [ -n "${PYTHON_MODULE:-}" ]; then
-    module load "$PYTHON_MODULE"
+
+# vLLM 0.11+ requires Python >= 3.10 (uses PEP-604 `X | Y` type syntax).
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
+if ! module load "$PYTHON_MODULE" 2>/dev/null; then
+    for alt in python/3.10 python3/3.11 python3/3.10; do
+        if module load "$alt" 2>/dev/null; then
+            PYTHON_MODULE="$alt"
+            break
+        fi
+    done
 fi
 
 # IMPORTANT: home has a small quota (~25 GB). vLLM+torch+CUDA (~10 GB) and the
@@ -65,7 +73,22 @@ mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
 ENV_DIR="${ENV_DIR:-$SCRATCH/envs/ppo-llm}"
 PY=python3
 command -v "$PY" >/dev/null || PY=python
+
+PY_VER="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "ERROR: need Python >= 3.10 for vLLM (found ${PY_VER})."
+    echo "  Try: module avail python   then  PYTHON_MODULE=python/3.11 sbatch ..."
+    exit 1
+fi
+
+# Drop a stale venv built with an older interpreter (e.g. system python3.9).
+if [ -d "$ENV_DIR" ] && ! "$ENV_DIR/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "Removing stale venv at ${ENV_DIR} (Python < 3.10)."
+    rm -rf "$ENV_DIR"
+fi
+
 if [ ! -d "$ENV_DIR" ]; then
+    echo "Creating venv with ${PY} (${PY_VER}) at ${ENV_DIR}"
     "$PY" -m venv "$ENV_DIR"
     source "$ENV_DIR/bin/activate"
     pip install --upgrade pip
@@ -87,6 +110,7 @@ echo "#  model=${MODEL} backend=${BACKEND} TP=${TP} quant='${QUANT}'"
 echo "#  sessions=${SESSIONS} periods=${PERIODS} window=${WINDOW}"
 echo "#  GPU: ${CUDA_VISIBLE_DEVICES:-(Slurm-assigned)}  job=${SLURM_JOB_ID:-local}"
 echo "#  results -> ${OUTPUT_DIR}   HF_HOME=${HF_HOME}"
+echo "#  python=$(python --version 2>&1)  module=${PYTHON_MODULE:-none}"
 echo "#  venv=${ENV_DIR}  pip_cache=${PIP_CACHE_DIR}"
 echo "####################################################################"
 

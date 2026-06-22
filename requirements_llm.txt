@@ -1,11 +1,6 @@
 # Extra dependencies for the LLM-agent ecosystem (llm_market/).
-# Install into a SEPARATE environment from the PPO runs (vLLM pins its own torch).
-#
-#   python -m venv ~/envs/ppo-llm && source ~/envs/ppo-llm/bin/activate
-#   pip install --upgrade pip
-#   pip install -r requirements_llm.txt
-#
-# vLLM ships a compatible CUDA torch build, so do NOT pre-install torch yourself.
+# Requires Python >= 3.10 (vLLM 0.11 uses PEP-604 type syntax).
+# Install into a SEPARATE environment on scratch (see run_gilbreth_llm.sh).
 
 vllm>=0.6.0
 transformers>=4.45.0
