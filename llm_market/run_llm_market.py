@@ -94,12 +94,16 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
         # ---- Step 4: parse actions ----
         actions_mw = {}
         reasonings = {}
+        strategies = {}
         for f in range(NUM_FIRMS):
             parsed = parse_action(
                 completions[f], f, default_mw=last_actions[f]
             )
             actions_mw[f] = parsed["mw"]
             reasonings[f] = parsed["reasoning"]
+            strategies[f] = parsed["strategy"]
+            # Carry the agent's own strategy note forward into its next prompt.
+            memories[f].set_strategy(parsed["strategy"])
             if not parsed["parse_ok"]:
                 parse_failures += 1
         last_actions = {f: actions_mw[f].copy() for f in range(NUM_FIRMS)}
@@ -169,6 +173,10 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
         "final_delta_combined": final_delta,
         "metrics": metrics,
         "parse_failures": parse_failures,
+        "final_strategies": {f: memories[f].latest_strategy for f in range(NUM_FIRMS)},
+        "final_cumulative_profit": {
+            f: memories[f].cumulative_profit for f in range(NUM_FIRMS)
+        },
         # empty placeholders so plot_results' optional panels degrade gracefully
         "limit_strategy": {},
         "deviation_experiment": {},

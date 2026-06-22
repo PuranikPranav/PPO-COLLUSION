@@ -37,7 +37,7 @@ WINDOW="${WINDOW:-1}"               # last-N periods in the prompt; 1 mimics PPO
 TP="${TP:-1}"                       # tensor-parallel GPUs (set 2 for the 30B model)
 QUANT="${QUANT:-}"                  # empty = bf16 (no quantization); 'fp8' only for big models
 TEMPERATURE="${TEMPERATURE:-0.7}"
-MAXTOK="${MAXTOK:-256}"
+MAXTOK="${MAXTOK:-384}"        # room for reasoning + strategy note + generation JSON
 MAXLEN="${MAXLEN:-8192}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-results/llm_granite8/h1}"

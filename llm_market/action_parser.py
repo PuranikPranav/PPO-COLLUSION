@@ -24,6 +24,10 @@ def action_json_schema(firm_id: int) -> dict:
         "type": "object",
         "properties": {
             "reasoning": {"type": "string"},
+            # A short standing plan the agent carries forward across periods. This is
+            # the LLM's only form of persistent "learning" (weights are frozen), so it
+            # is fed back into the next prompt to let a strategy accumulate over time.
+            "strategy": {"type": "string"},
             "generation_mw": {
                 "type": "array",
                 "items": {"type": "number"},
@@ -31,7 +35,7 @@ def action_json_schema(firm_id: int) -> dict:
                 "maxItems": n,
             },
         },
-        "required": ["reasoning", "generation_mw"],
+        "required": ["reasoning", "strategy", "generation_mw"],
         "additionalProperties": False,
     }
 
@@ -92,8 +96,8 @@ def parse_action(text: str, firm_id: int,
                  default_mw: Optional[np.ndarray] = None) -> dict:
     """Parse one model response into a validated MW array.
 
-    Returns a dict: {"mw": np.ndarray(n_plants), "reasoning": str, "parse_ok": bool}.
-    On total failure, falls back to `default_mw` (or half-capacity).
+    Returns a dict: {"mw": np.ndarray(n_plants), "reasoning": str, "strategy": str,
+    "parse_ok": bool}. On total failure, falls back to `default_mw` (or half-capacity).
     """
     caps = firm_caps(firm_id)
     n = len(caps)
@@ -103,6 +107,7 @@ def parse_action(text: str, firm_id: int,
 
     obj = None
     reasoning = ""
+    strategy = ""
     parse_ok = False
 
     candidate = text if text else ""
@@ -117,6 +122,7 @@ def parse_action(text: str, firm_id: int,
 
     if isinstance(obj, dict):
         reasoning = str(obj.get("reasoning", "")).strip()
+        strategy = str(obj.get("strategy", "")).strip()
         raw = obj.get("generation_mw", obj.get("generation", obj.get("mw")))
         nums = _coerce_numbers(raw) if raw is not None else []
         if nums:
@@ -132,4 +138,4 @@ def parse_action(text: str, firm_id: int,
         mw = fallback.copy()
 
     mw = np.clip(mw, 0.0, caps)
-    return {"mw": mw, "reasoning": reasoning, "parse_ok": parse_ok}
+    return {"mw": mw, "reasoning": reasoning, "strategy": strategy, "parse_ok": parse_ok}

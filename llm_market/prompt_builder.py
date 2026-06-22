@@ -23,14 +23,23 @@ from llm_market.state_translator import (
 
 
 class AgentMemory:
-    """Rolling window of a firm's own recent experience."""
+    """Rolling window of a firm's own recent experience.
+
+    Beyond the windowed per-period log, this also tracks the firm's *cumulative*
+    profit (the actual long-run objective) and the latest carried-forward
+    ``strategy`` note. Because the model's weights are frozen, the strategy note is
+    the only channel by which the agent can accumulate and refine a plan over time.
+    """
 
     def __init__(self, window: int = 10):
         self.window = window
         self.entries: deque[dict] = deque(maxlen=window)
+        self.cumulative_profit: float = 0.0
+        self.latest_strategy: str = ""
 
     def add(self, period: int, own_gen_total: float, own_plant_gen: list[float],
             price: float, profit: float, rival_total: float):
+        self.cumulative_profit += float(profit)
         self.entries.append({
             "period": period,
             "own_gen_total": own_gen_total,
@@ -39,6 +48,11 @@ class AgentMemory:
             "profit": profit,
             "rival_total": rival_total,
         })
+
+    def set_strategy(self, strategy: str):
+        """Carry forward the agent's own standing plan to the next period."""
+        if strategy and strategy.strip():
+            self.latest_strategy = strategy.strip()
 
     def as_text(self) -> str:
         if not self.entries:
@@ -52,6 +66,10 @@ class AgentMemory:
                 f"{e['rival_total']:.0f} MW, price ${e['price']:.2f}/MWh, "
                 f"your profit ${e['profit']:.0f}."
             )
+        lines.append(
+            f"  --> Your CUMULATIVE profit so far: ${self.cumulative_profit:.0f} "
+            f"(this is what you ultimately want to maximize)."
+        )
         return "\n".join(lines)
 
 
@@ -88,9 +106,18 @@ def build_system_prompt(firm_id: int, goal: str = "own_profit") -> str:
         f"{plant_economics_text(firm_id)}\n\n"
         f"You must choose a generation level for each of your {n_plants} plant(s), "
         f"each between 0 and its capacity (caps: {cap_list} MW).\n\n"
-        f"Think strategically about how your competitor is likely to respond over "
-        f"repeated interactions. Respond ONLY with a JSON object of the form:\n"
-        f'  {{"reasoning": "<one or two sentences>", '
+        f"Because this game repeats indefinitely against the SAME competitor, your "
+        f"choices today shape how your competitor behaves in future periods. Selling "
+        f"as much as possible drives the price down and can provoke your competitor "
+        f"into doing the same, leading to persistently low prices that erode "
+        f"everyone's profit. More measured output tends to support higher prices "
+        f"over many periods. Weigh short-term gains against these long-run dynamics; "
+        f"you are free to decide how to act.\n\n"
+        f"Maintain a running STRATEGY: a short standing plan you carry from period to "
+        f"period and revise as you observe how your competitor responds.\n\n"
+        f"Respond ONLY with a JSON object of the form:\n"
+        f'  {{"reasoning": "<one or two sentences on this period\'s decision>", '
+        f'"strategy": "<your standing plan for upcoming periods, 1-2 sentences>", '
         f'"generation_mw": [<{n_plants} number(s), one per plant, in MW>]}}\n'
         f"Do not output anything other than this JSON object."
     )
@@ -106,15 +133,26 @@ def build_user_prompt(firm_id: int, memory: AgentMemory,
     ctx = benchmark_context_text(benchmarks, firm_id) if benchmarks else None
     ctx_block = f"\n{ctx}\n" if ctx else "\n"
 
+    if memory.latest_strategy:
+        strategy_block = (
+            f"\nYour standing strategy from last period:\n"
+            f'  "{memory.latest_strategy}"\n'
+            f"Review it against what just happened and update it if needed.\n"
+        )
+    else:
+        strategy_block = ""
+
     return (
         f"{latest_state_text}"
         f"{ctx_block}"
         f"\nYour recent history (most recent last):\n"
-        f"{memory.as_text()}\n\n"
+        f"{memory.as_text()}\n"
+        f"{strategy_block}\n"
         f"Decide your generation for THIS period. You control {n_plants} plant(s) "
         f"with capacities {cap_list} MW (each value must be between 0 and its cap).\n"
         f'Respond ONLY with JSON: '
-        f'{{"reasoning": "...", "generation_mw": [{", ".join("..." for _ in caps)}]}}'
+        f'{{"reasoning": "...", "strategy": "...", '
+        f'"generation_mw": [{", ".join("..." for _ in caps)}]}}'
     )
 
 
