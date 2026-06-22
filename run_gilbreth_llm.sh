@@ -4,14 +4,13 @@
 # Submit from repo root:
 #   sbatch -J llm-granite -o slurm-llm-%j.out -e slurm-llm-%j.err run_gilbreth_llm.sh
 #
-# Default: Granite 4.1 8B (instruct) in bf16 on a single A100-40GB.
+# Default: Granite 3.3 8B (instruct) in bf16 on a single A100-40GB.
 # Fits comfortably (~18 GB), full precision, no quantization caveats.
+# (3.3-8b-instruct is a public, dense model proven with vLLM 0.11.)
 #
 # Alternatives (override via environment variables):
-#   # Smaller / faster (3B):
-#   MODEL=ibm-granite/granite-4.1-3b-instruct sbatch run_gilbreth_llm.sh
-#   # Larger (30B) in bf16 across two A100-40GB GPUs:
-#   MODEL=ibm-granite/granite-4.1-30b-instruct TP=2 sbatch -G2 -J llm-granite30 run_gilbreth_llm.sh
+#   # Smaller / faster (2B):
+#   MODEL=ibm-granite/granite-3.3-2b-instruct sbatch run_gilbreth_llm.sh
 #
 #SBATCH --job-name=llm-granite8
 #SBATCH --account=liu334
@@ -30,7 +29,7 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 export PYTHONUNBUFFERED=1
 
 # ---- Tunables (override via env) ----
-MODEL="${MODEL:-ibm-granite/granite-4.1-8b-instruct}"
+MODEL="${MODEL:-ibm-granite/granite-3.3-8b-instruct}"
 BACKEND="${BACKEND:-vllm}"
 SESSIONS="${SESSIONS:-20}"
 PERIODS="${PERIODS:-300}"
@@ -98,10 +97,23 @@ if [ -z "$PY" ]; then
 fi
 PY_VER="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 
+# Pinned vLLM version this run expects (kept in sync with requirements_llm.txt).
+PIN_VLLM="${PIN_VLLM:-0.11.0}"
+
 # Drop a stale venv built with an older interpreter (e.g. system python3.9).
 if [ -d "$ENV_DIR" ] && ! "$ENV_DIR/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
     echo "Removing stale venv at ${ENV_DIR} (Python < 3.10)."
     rm -rf "$ENV_DIR"
+fi
+
+# Drop a venv whose vLLM doesn't match the pin (e.g. an old 0.23 CUDA-13 build).
+# This makes the script self-healing after a requirements change.
+if [ -d "$ENV_DIR" ]; then
+    HAVE_VLLM="$("$ENV_DIR/bin/python" -c 'import importlib.metadata as m; print(m.version("vllm"))' 2>/dev/null || true)"
+    if [ "$HAVE_VLLM" != "$PIN_VLLM" ]; then
+        echo "Rebuilding venv: have vLLM '${HAVE_VLLM:-none}', want '${PIN_VLLM}'."
+        rm -rf "$ENV_DIR"
+    fi
 fi
 
 if [ ! -d "$ENV_DIR" ]; then

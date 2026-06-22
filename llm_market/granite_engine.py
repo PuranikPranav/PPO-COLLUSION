@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 
 
-DEFAULT_MODEL = "ibm-granite/granite-4.1-8b-instruct"
+DEFAULT_MODEL = "ibm-granite/granite-3.3-8b-instruct"
 
 
 # ----------------------------------------------------------------------

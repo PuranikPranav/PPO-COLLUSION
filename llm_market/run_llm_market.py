@@ -13,7 +13,7 @@ Example (local pipeline test, no GPU):
 
 Example (Granite on the A100 via vLLM):
     python llm_market/run_llm_market.py --backend vllm \
-        --model ibm-granite/granite-4.1-8b-instruct \
+        --model ibm-granite/granite-3.3-8b-instruct \
         --num-sessions 20 --num-periods 300 --history-window 10 \
         --output-dir results/llm_granite_h1
 

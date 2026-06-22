@@ -61,12 +61,10 @@ python llm_market/run_llm_market.py --backend mock \
 | Config | Fits on | Command |
 |--------|---------|---------|
 | **8B, bf16 (default)** | 1× A100-40GB | `sbatch -J llm-granite8 run_gilbreth_llm.sh` |
-| 3B, bf16 (fastest) | 1× A100-40GB | `MODEL=ibm-granite/granite-4.1-3b-instruct sbatch run_gilbreth_llm.sh` |
-| 30B, bf16, 2 GPUs | 2× A100-40GB | `MODEL=ibm-granite/granite-4.1-30b-instruct TP=2 sbatch -G2 -J llm-granite30 run_gilbreth_llm.sh` |
+| 2B, bf16 (fastest) | 1× A100-40GB | `MODEL=ibm-granite/granite-3.3-2b-instruct sbatch run_gilbreth_llm.sh` |
 
-The 8B model is IBM's recommended balanced choice and (per IBM) matches or beats the
-older Granite 4.0 32B MoE — strong enough for the strategic reasoning here while fitting
-on one GPU at full precision.
+The default is `ibm-granite/granite-3.3-8b-instruct` — a public, dense Granite model
+that is well-supported by vLLM 0.11 and fits on one A100-40GB at full (bf16) precision.
 
 Other overridable env vars: `SESSIONS`, `PERIODS`, `WINDOW`, `TEMPERATURE`, `MAXTOK`,
 `SEED`, `OUTPUT_DIR`, `FIGURES_DIR`.
