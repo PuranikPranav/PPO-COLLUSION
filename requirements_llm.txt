@@ -1,0 +1,20 @@
+# Extra dependencies for the LLM-agent ecosystem (llm_market/).
+# Install into a SEPARATE environment from the PPO runs (vLLM pins its own torch).
+#
+#   python -m venv ~/envs/ppo-llm && source ~/envs/ppo-llm/bin/activate
+#   pip install --upgrade pip
+#   pip install -r requirements_llm.txt
+#
+# vLLM ships a compatible CUDA torch build, so do NOT pre-install torch yourself.
+
+vllm>=0.6.0
+transformers>=4.45.0
+accelerate>=0.34.0
+
+# Needed by the reused market env + benchmarks (iso_market / experiments.ppo):
+numpy>=1.24
+scipy>=1.10
+cvxpy>=1.4
+
+# Plotting (reuses experiments/plot_results.py):
+matplotlib>=3.7
