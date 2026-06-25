@@ -712,65 +712,117 @@ def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=
 
 
 def run_deviation_experiment(env, agents, obs_normalizers,
-                             deviation_frac=0.2, warmup=20, horizon=20):
+                             deviation_frac=0.2, warmup=20, horizon=20, pre=4):
     """
-    After convergence, force one firm to increase output by deviation_frac
-    for one step and observe the response — analogous to Calvano Fig 4.
+    The punishment / impulse-response experiment (Calvano Fig. 4 analogue) — this is
+    the experiment that reveals whether the learned equilibrium is sustained by a
+    reward-punishment (trigger) strategy, i.e. genuine tacit collusion.
+
+    Per deviating firm:
+      1. Warm up `warmup` steps with the learned deterministic policy -> resting point.
+      2. Record `pre` resting periods (so the figure shows a flat collusive baseline).
+      3. ONE deviation period: the deviator's output is forced to (1+deviation_frac)x.
+      4. `horizon` periods of normal deterministic play -> observe the RIVAL's reaction.
+
+    Reading the result (quantity competition):
+      - PUNISHMENT  = the rival RAISES output after the cheat (floods to crash the
+        price, hurting the deviator) and both then de-escalate back toward resting.
+        A rival that punishes is enforcing the collusive norm -> tacit collusion.
+      - ACCOMMODATION = the rival does NOT react; the deviation just decays. (No
+        trigger strategy was learned.)
+
+    NOTE on memory: with history_len H the rival only "remembers" the cheat for H
+    periods, so a *sustained* punishment phase requires H>1. With H=1 punishment can
+    last at most ~1 period.
+
+    The returned per-deviator dict carries the full trace, the index of the deviation
+    period (`dev_index`), the resting levels, and a quantitative `punishment` summary.
     """
     results = {}
 
+    def det_actions(obs):
+        a = {}
+        for fid, agent in agents.items():
+            a[fid] = agent.deterministic_action(obs_normalizers[fid].normalize(obs[fid]))
+        return a
+
     for deviating_fid in range(NUM_FIRMS):
+        rival_fid = next(f for f in range(NUM_FIRMS) if f != deviating_fid)
         obs = env.reset()
 
-        # Warm up with deterministic policies to reach the "resting point"
+        # 1. Warm up to the resting point.
         for _ in range(warmup):
-            actions = {}
-            for fid, agent in agents.items():
-                obs_norm = obs_normalizers[fid].normalize(obs[fid])
-                actions[fid] = agent.deterministic_action(obs_norm)
-            obs, _, _done, _ = env.step(actions)
+            obs, _, _done, _ = env.step(det_actions(obs))
 
-        # Record resting generation
-        resting = {}
-        for fid, agent in agents.items():
-            obs_norm = obs_normalizers[fid].normalize(obs[fid])
-            resting[fid] = agent.deterministic_action(obs_norm)
+        # Resting generation (reference levels).
+        resting = det_actions(obs)
 
         trace_gen = {str(fid): [] for fid in range(NUM_FIRMS)}
         trace_lmp = []
 
-        # --- Deviation step ---
-        actions = {}
-        for fid, agent in agents.items():
-            obs_norm = obs_normalizers[fid].normalize(obs[fid])
-            actions[fid] = agent.deterministic_action(obs_norm)
+        # 2. Pre-deviation resting periods (recorded so the plot shows the baseline).
+        for _ in range(pre):
+            actions = det_actions(obs)
+            obs, _, done, info = env.step(actions)
+            if done and info.get("error"):
+                obs = env.reset()
+                continue
+            for fid in range(NUM_FIRMS):
+                trace_gen[str(fid)].append(float(np.sum(actions[fid])))
+            trace_lmp.append(float(info.get("avg_lmp", 0)))
+
+        dev_index = len(trace_lmp)  # the deviation lands at this index in the trace
+
+        # 3. Deviation period (deviator forced up; rival plays its policy simultaneously).
+        actions = det_actions(obs)
         deviated = actions[deviating_fid] * (1 + deviation_frac)
         for j, pidx in enumerate(FIRM_PLANT_IDX[deviating_fid]):
             deviated[j] = min(deviated[j], PLANTS[pidx]["cap"])
         actions[deviating_fid] = deviated
-
         obs, _, done, info = env.step(actions)
         if done and info.get("error"):
             obs = env.reset()
         for fid in range(NUM_FIRMS):
             trace_gen[str(fid)].append(float(np.sum(actions[fid])))
-        trace_lmp.append(info.get("avg_lmp", 0))
+        trace_lmp.append(float(info.get("avg_lmp", 0)))
 
-        # --- Post-deviation: both play deterministic ---
+        # 4. Post-deviation: both play their learned deterministic policy.
         for _ in range(horizon):
-            actions = {}
-            for fid, agent in agents.items():
-                obs_norm = obs_normalizers[fid].normalize(obs[fid])
-                actions[fid] = agent.deterministic_action(obs_norm)
+            actions = det_actions(obs)
             obs, _, done, info = env.step(actions)
+            if done and info.get("error"):
+                obs = env.reset()
+                continue
             for fid in range(NUM_FIRMS):
                 trace_gen[str(fid)].append(float(np.sum(actions[fid])))
-            trace_lmp.append(info.get("avg_lmp", 0))
+            trace_lmp.append(float(info.get("avg_lmp", 0)))
+
+        # --- Quantitative punishment summary (the rival's reaction to the cheat) ---
+        rival_rest = float(np.sum(resting[rival_fid]))
+        rival_post = np.asarray(trace_gen[str(rival_fid)][dev_index + 1:], dtype=float)
+        rival_max_post = float(rival_post.max()) if rival_post.size else rival_rest
+        lmp_pre = float(np.mean(trace_lmp[:dev_index])) if dev_index else float(trace_lmp[0])
+        lmp_post = trace_lmp[dev_index:]
+        lmp_min_post = float(np.min(lmp_post)) if lmp_post else lmp_pre
+        increase = rival_max_post - rival_rest
+        punishment = {
+            "rival_fid": rival_fid,
+            "rival_resting_mw": rival_rest,
+            "rival_max_post_mw": rival_max_post,
+            "rival_output_increase_mw": increase,   # > 0  => the rival floods = punishment
+            "lmp_pre": lmp_pre,
+            "lmp_min_post": lmp_min_post,
+            "lmp_drop": lmp_pre - lmp_min_post,
+            # A retaliation if the rival raises output meaningfully above its resting level.
+            "punished": bool(increase > max(1.0, 0.03 * rival_rest)),
+        }
 
         results[str(deviating_fid)] = {
             "resting": {str(fid): float(np.sum(resting[fid])) for fid in range(NUM_FIRMS)},
             "gen": trace_gen,
             "lmp": trace_lmp,
+            "dev_index": dev_index,
+            "punishment": punishment,
         }
 
     return results
@@ -951,35 +1003,33 @@ def train_session(env, benchmarks, args, session_id, device):
 
     _print_session_convergence_banner(args, session_id)
 
-    # ---------- step-0 snapshot of the *untrained* policy ----------
-    # Captures the genuine initial dispersion across seeds (before any PPO update),
-    # which is exactly the wide starting band that heavy smoothing + logging-at-update-5
-    # used to hide. Greedy generation here starts at the competitive baseline by design.
-    init_obs_by_firm = {
-        fid: obs_normalizers[fid].normalize(obs[fid])[np.newaxis, :]
-        for fid in agents
+    # ---------- t=0 anchor: the COMPETITIVE benchmark ----------
+    # The plotted trajectory STARTS at the competitive generation / price / profit —
+    # the economically natural starting point (the market the agents are "born into",
+    # which is also what the observation history is seeded with). Every subsequent
+    # logged point is what the LEARNED policy chooses, so the figures read:
+    #   t=0  -> competitive quantities,   t>=1 -> whatever the policy chooses.
+    comp_b = benchmarks["competitive"]
+    comp_profits = {fid: float(comp_b["profits"][str(fid)]) for fid in range(NUM_FIRMS)}
+    comp_delta = compute_combined_delta(comp_profits, pi_nash, pi_mono)
+    init_row = {
+        "step": 0,
+        "episodes": 0,
+        "wall_sec": 0.0,
+        "ppo_update": 0,
+        "ppo_updates_total": num_updates,
+        "convergence_mode": args.convergence_mode,
+        "early_stop_active": use_convergence,
+        "avg_lmp": float(comp_b["avg_lmp"]),
+        "delta_combined": float(comp_delta),
+        "greedy_delta_combined": float(comp_delta),
     }
-    gr0 = compute_greedy_metrics_from_obs(
-        env, agents, init_obs_by_firm, pi_nash, pi_mono
-    )
-    if gr0 is not None:
-        init_row = {
-            "step": 0,
-            "episodes": 0,
-            "wall_sec": 0.0,
-            "ppo_update": 0,
-            "ppo_updates_total": num_updates,
-            "convergence_mode": args.convergence_mode,
-            "early_stop_active": use_convergence,
-            "avg_lmp": float(gr0.get("greedy_avg_lmp", float("nan"))),
-            "delta_combined": float(gr0["greedy_delta_combined"]),
-            "greedy_delta_combined": float(gr0["greedy_delta_combined"]),
-        }
-        for fid in range(NUM_FIRMS):
-            g = float(gr0["greedy_totals"][fid])
-            init_row[f"firm_{fid}_greedy_gen"] = g
-            init_row[f"firm_{fid}_avg_gen"] = g
-        log_rows.append(init_row)
+    for fid in range(NUM_FIRMS):
+        g = float(sum(comp_b["gens"][pidx] for pidx in FIRM_PLANT_IDX[fid]))
+        init_row[f"firm_{fid}_greedy_gen"] = g
+        init_row[f"firm_{fid}_avg_gen"] = g
+        init_row[f"firm_{fid}_avg_step_profit"] = comp_profits[fid]
+    log_rows.append(init_row)
 
     for update in range(num_updates):
         # ---------- collect rollout ----------
@@ -1240,6 +1290,7 @@ def train_session(env, benchmarks, args, session_id, device):
         deviation_frac=args.deviation_frac,
         warmup=args.deviation_warmup,
         horizon=args.deviation_horizon,
+        pre=args.deviation_pre,
     )
 
     final_avg_step = {}
@@ -1439,6 +1490,10 @@ def parse_args():
     p.add_argument("--deviation-frac", type=float, default=0.2)
     p.add_argument("--deviation-warmup", type=int, default=20)
     p.add_argument("--deviation-horizon", type=int, default=40)
+    p.add_argument("--deviation-pre", type=int, default=4,
+                   help="Resting periods recorded BEFORE the forced deviation, so the "
+                        "punishment figure shows the flat collusive baseline -> cheat -> "
+                        "retaliation -> recovery.")
 
     # PPO
     p.add_argument("--total-timesteps", type=int, default=500_000,

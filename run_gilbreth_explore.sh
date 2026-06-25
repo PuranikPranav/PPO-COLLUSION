@@ -19,6 +19,13 @@
 # Monitor:  squeue -u $USER ;  tail -f slurm-explore-*.out
 # Outputs:  results/explore/h<H>/   figures/explore/
 #
+# PUNISHMENT EXPERIMENT NOTE: the deviation/punishment figure reveals whether the
+# learned equilibrium is sustained by retaliation (genuine tacit collusion). With
+# history_len H the rival only "remembers" a cheat for H periods, so a *sustained*
+# punishment phase needs H>1. For the punishment story run e.g.:
+#     H=5 sbatch run_gilbreth_explore.sh
+# (H=1 can show at most ~one period of retaliation.)
+#
 #SBATCH --job-name=ppo-explore
 #SBATCH --account=liu334
 #SBATCH --partition=a100-40gb

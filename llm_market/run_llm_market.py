@@ -166,6 +166,7 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
             deviation_frac=args.deviation_frac,
             warmup=args.deviation_warmup,
             horizon=args.deviation_horizon,
+            pre=args.deviation_pre,
         )
         if run_dev else {}
     )
@@ -356,6 +357,9 @@ def parse_args():
                    help="Periods of normal play before the forced deviation.")
     p.add_argument("--deviation-horizon", type=int, default=20,
                    help="Periods of normal play observed after the deviation (the punishment window).")
+    p.add_argument("--deviation-pre", type=int, default=4,
+                   help="Resting periods recorded BEFORE the forced deviation (flat "
+                        "collusive baseline in the punishment figure).")
     p.add_argument("--deviation-max-sessions", type=int, default=5,
                    help="Run the deviation/limit experiments only on the first N sessions.")
     p.add_argument("--limit-strategy", action="store_true", default=False,

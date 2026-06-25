@@ -691,6 +691,7 @@ def plot_impulse_response(axes, config, sessions):
     """Two subplots: one for each firm deviating."""
     for dev_fid, ax in enumerate(axes):
         traces = {str(f): [] for f in range(2)}
+        dev_idxs = []
         for sess in sessions:
             de = sess.get("deviation_experiment", {})
             entry = de.get(str(dev_fid))
@@ -698,13 +699,17 @@ def plot_impulse_response(axes, config, sessions):
                 continue
             for fid_str in ["0", "1"]:
                 traces[fid_str].append(entry["gen"][fid_str])
+            if entry.get("dev_index") is not None:
+                dev_idxs.append(int(entry["dev_index"]))
 
         if not traces["0"]:
             ax.text(0.5, 0.5, "No deviation data", transform=ax.transAxes, ha="center")
             continue
 
         horizon = len(traces["0"][0])
-        t = np.arange(horizon)
+        di = int(round(np.mean(dev_idxs))) if dev_idxs else 0
+        t = np.arange(horizon) - di
+        ax.axvline(0, color="red", ls="--", alpha=0.45, lw=0.9)
 
         for fid_str, color in [("0", "C0"), ("1", "C1")]:
             matrix = np.array(traces[fid_str])
@@ -743,6 +748,8 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
     gen_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
     lmp_by_dev = {str(d): [] for d in range(num_firms)}
     resting_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
+    devidx_by_dev = {str(d): [] for d in range(num_firms)}
+    punish_by_dev = {str(d): [] for d in range(num_firms)}
 
     for sess in sessions:
         de = sess.get("deviation_experiment", {}) or {}
@@ -759,6 +766,10 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
             lmp = entry.get("lmp")
             if lmp:
                 lmp_by_dev[dev_str].append(np.asarray(lmp, dtype=float))
+            if entry.get("dev_index") is not None:
+                devidx_by_dev[dev_str].append(int(entry["dev_index"]))
+            if entry.get("punishment") is not None:
+                punish_by_dev[dev_str].append(entry["punishment"])
 
     deviators = sorted(
         [d for d in gen_by_dev if any(gen_by_dev[d][f] for f in gen_by_dev[d])],
@@ -787,6 +798,22 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
         gen_ax = axes[0, col]
         lmp_ax = axes[1, col]
 
+        # Deviation index (pre-deviation resting periods sit at negative time).
+        di = int(round(np.mean(devidx_by_dev[dev_str]))) if devidx_by_dev[dev_str] else 0
+
+        # Punishment summary across sessions (the rival's reaction to the cheat).
+        punishes = punish_by_dev[dev_str]
+        punish_txt = ""
+        if punishes:
+            frac = float(np.mean([1.0 if p.get("punished") else 0.0 for p in punishes]))
+            inc = float(np.mean([p.get("rival_output_increase_mw", 0.0) for p in punishes]))
+            drop = float(np.mean([p.get("lmp_drop", 0.0) for p in punishes]))
+            verdict = "PUNISHMENT (rival floods, price war)" if frac >= 0.5 else "ACCOMMODATION (no retaliation)"
+            punish_txt = (
+                f"Rival retaliated in {frac:.0%} of seeds  |  "
+                f"rival output +{inc:.1f} MW, price -${drop:.2f}\n{verdict}"
+            )
+
         # ---- Generation panel ----
         for fstr in [str(f) for f in range(num_firms)]:
             mats = gen_by_dev[dev_str][fstr]
@@ -796,7 +823,7 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
             matrix = np.stack([arr[:T] for arr in mats])
             mean = matrix.mean(axis=0)
             std = matrix.std(axis=0)
-            t = np.arange(T)
+            t = np.arange(T) - di
             is_dev = fstr == dev_str
             color = f"C{int(fstr)}"
             lw = 2.2 if is_dev else 1.6
@@ -819,11 +846,16 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
                 )
 
         gen_ax.axvline(0, color="red", ls="--", alpha=0.55, lw=1.0)
+        annot = (
+            f"t<0: collusive resting.   t=0: deviator forced to +{dev_frac:.0%} for one "
+            "step,\nthen both play their learned deterministic policy."
+        )
+        if punish_txt:
+            annot += "\n" + punish_txt
         gen_ax.text(
             0.02,
             0.97,
-            f"t=0: deviator forced to +{dev_frac:.0%} for one step,\n"
-            "then both play their learned deterministic policy.",
+            annot,
             transform=gen_ax.transAxes,
             ha="left",
             va="top",
@@ -843,26 +875,26 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
             matrix = np.stack([arr[:T] for arr in mats])
             mean = matrix.mean(axis=0)
             std = matrix.std(axis=0)
-            t = np.arange(T)
+            t = np.arange(T) - di
             lmp_ax.plot(t, mean, color="black", lw=1.8, label="Avg LMP (qty-weighted)")
             if matrix.shape[0] > 1:
                 lmp_ax.fill_between(t, mean - std, mean + std, color="black", alpha=0.12)
-            if len(mean):
+            if di < len(mean):
                 lmp_ax.scatter(
                     [0],
-                    [mean[0]],
+                    [mean[di]],
                     color="red",
                     zorder=5,
                     s=46,
-                    label=f"At deviation: ${mean[0]:.2f}",
+                    label=f"At deviation: ${mean[di]:.2f}",
                 )
                 lmp_ax.scatter(
-                    [T - 1],
+                    [T - 1 - di],
                     [mean[-1]],
                     color="green",
                     zorder=5,
                     s=46,
-                    label=f"After {T - 1} steps: ${mean[-1]:.2f}",
+                    label=f"After {T - 1 - di} steps: ${mean[-1]:.2f}",
                 )
 
         if comp_lmp is not None:
