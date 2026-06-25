@@ -731,9 +731,16 @@ def run_deviation_experiment(env, agents, obs_normalizers,
       - ACCOMMODATION = the rival does NOT react; the deviation just decays. (No
         trigger strategy was learned.)
 
-    NOTE on memory: with history_len H the rival only "remembers" the cheat for H
-    periods, so a *sustained* punishment phase requires H>1. With H=1 punishment can
-    last at most ~1 period.
+    NOTE on memory and punishment DURATION: one-period memory (H=1) does NOT cap the
+    punishment at one period. As in Calvano et al. (2020) and Calzolari et al. (2021),
+    H=1 is enough to DETECT a deviation (a low price / high rival output last period);
+    the punishment then sustains itself through the STATE dynamics -- the low price the
+    retaliation creates becomes next period's state and triggers continued but GRADUALLY
+    milder retaliation, so the price level itself acts as a "surrogate clock" and the
+    price war fades over several periods back to the collusive resting point. H=1 is the
+    canonical Calvano setup and is sufficient for multi-period punishment; H>1 only adds
+    state information (e.g. to tell a deviation from a demand shock). Whether the agents
+    learn this is emergent.
 
     The returned per-deviator dict carries the full trace, the index of the deviation
     period (`dev_index`), the resting levels, and a quantitative `punishment` summary.

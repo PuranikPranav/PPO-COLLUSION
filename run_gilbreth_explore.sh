@@ -20,11 +20,14 @@
 # Outputs:  results/explore/h<H>/   figures/explore/
 #
 # PUNISHMENT EXPERIMENT NOTE: the deviation/punishment figure reveals whether the
-# learned equilibrium is sustained by retaliation (genuine tacit collusion). With
-# history_len H the rival only "remembers" a cheat for H periods, so a *sustained*
-# punishment phase needs H>1. For the punishment story run e.g.:
-#     H=5 sbatch run_gilbreth_explore.sh
-# (H=1 can show at most ~one period of retaliation.)
+# learned equilibrium is sustained by retaliation (genuine tacit collusion). H=1
+# (one-period memory) is SUFFICIENT for multi-period punishment -- this is exactly the
+# Calvano et al. (2020) / Calzolari et al. (2021) setup. H=1 only needs to DETECT the
+# cheat (low price / high rival output last period); the price war then self-perpetuates
+# through the state and fades gradually (the price level acts as a surrogate clock), so
+# punishment lasts many periods then returns to the collusive resting point. H>1 just
+# adds state info (e.g. distinguishing a deviation from a demand shock) and is NOT
+# required. Default H=1 matches the canonical setup.
 #
 #SBATCH --job-name=ppo-explore
 #SBATCH --account=liu334
