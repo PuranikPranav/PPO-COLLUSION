@@ -899,13 +899,16 @@ def train_session(env, benchmarks, args, session_id, device):
             caps=caps, hidden=args.hidden_dim, lr=args.lr,
             rollout_len=args.rollout_len, device=device,
         )
-        # Start each firm's greedy generation at the competitive baseline so every
-        # session begins from the (observation-seeded) competitive point, with broad
-        # initial sampling around it.
-        if args.init_policy == "competitive":
-            target_frac = np.array(
-                [comp_gens[pidx] / PLANTS[pidx]["cap"] for pidx in FIRM_PLANT_IDX[fid]]
-            )
+        # Seed the policy mean. "competitive" pins it at the MAX-output ceiling, so the
+        # trajectory can only descend (no upward exploration). "neutral" seeds it at an
+        # interior fraction so agents explore both directions before settling.
+        if args.init_policy in ("competitive", "neutral"):
+            if args.init_policy == "competitive":
+                target_frac = np.array(
+                    [comp_gens[pidx] / PLANTS[pidx]["cap"] for pidx in FIRM_PLANT_IDX[fid]]
+                )
+            else:  # neutral: interior start, two-sided exploration
+                target_frac = np.full(len(FIRM_PLANT_IDX[fid]), args.init_fraction)
             agents[fid].ac.init_policy_mean(
                 target_frac,
                 concentration=args.init_concentration,
@@ -1403,10 +1406,19 @@ def parse_args():
         "--init-policy",
         type=str,
         default="competitive",
-        choices=("competitive", "default"),
-        help="competitive: initialize each firm's greedy generation at the competitive "
-        "baseline (so sessions start from the competitive point). default: standard "
-        "random init (mean ≈ 0.5·cap).",
+        choices=("competitive", "neutral", "default"),
+        help="competitive: start each firm's policy at the competitive (MAX-output) "
+        "baseline — the trajectory can then only DESCEND (no upward exploration is "
+        "possible from the capacity ceiling). neutral: start at --init-fraction of "
+        "capacity (interior) so agents can explore BOTH up and down before settling. "
+        "default: standard random init (mean ≈ 0.5·cap).",
+    )
+    p.add_argument(
+        "--init-fraction",
+        type=float,
+        default=0.5,
+        help="Target Beta mean (fraction of capacity) for --init-policy neutral. "
+        "0.5 starts each firm mid-range so exploration is two-sided.",
     )
     p.add_argument(
         "--init-concentration",

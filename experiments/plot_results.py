@@ -365,6 +365,10 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
     h = history_label if history_label is not None else config.get("history_len", "?")
     max_steps = 2_000_000
     comp, mono = _firm_comp_mono_total_mw(config)
+    # Nash per-firm total MW (Δ=0 reference) — the line that makes "settled between
+    # Nash and Monopoly = collusion" readable on the quantity plot.
+    _ng = config.get("benchmarks", {}).get("cournot_nash", {}).get("gens")
+    nash = (_ng[0] + _ng[1], _ng[2]) if _ng else None
 
     use_greedy = _metrics_has_key(sessions, "firm_0_greedy_gen")
     gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
@@ -394,8 +398,11 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
 
     ax1.axhline(comp[0], ls="--", color="C0", alpha=0.55, linewidth=1.0, label="Competitive (F0)")
     ax1.axhline(comp[1], ls="--", color="C1", alpha=0.55, linewidth=1.0, label="Competitive (F1)")
-    ax1.axhline(mono[0], ls=":", color="C0", alpha=0.75, linewidth=1.2, label="Monopoly (F0)")
-    ax1.axhline(mono[1], ls=":", color="C1", alpha=0.75, linewidth=1.2, label="Monopoly (F1)")
+    if nash is not None:
+        ax1.axhline(nash[0], ls="-.", color="C0", alpha=0.7, linewidth=1.1, label="Nash (F0)")
+        ax1.axhline(nash[1], ls="-.", color="C1", alpha=0.7, linewidth=1.1, label="Nash (F1)")
+    ax1.axhline(mono[0], ls=":", color="C0", alpha=0.85, linewidth=1.4, label="Monopoly (F0)")
+    ax1.axhline(mono[1], ls=":", color="C1", alpha=0.85, linewidth=1.4, label="Monopoly (F1)")
     ax1.set_xlim(0, max_steps)
     ax1.set_xticks(CALVANO_XTICKS)
     ax1.xaxis.set_major_formatter(_calvano_xtick_formatter())
