@@ -54,7 +54,9 @@ INIT_POLICY="${INIT_POLICY:-neutral}"   # neutral = interior start (two-sided ex
 INIT_FRACTION="${INIT_FRACTION:-0.5}"   # start each plant at 50% of capacity
 INIT_CONC="${INIT_CONC:-1.2}"           # low Beta concentration => broad initial sampling
 INIT_WSCALE="${INIT_WSCALE:-0.3}"       # per-seed spread around the interior start
-ENT_COEF="${ENT_COEF:-0.015}"           # entropy bonus: keep exploring before sharpening
+ENT_COEF="${ENT_COEF:-0.02}"            # entropy bonus at the START (high exploration)
+ENT_COEF_FINAL="${ENT_COEF_FINAL:-0.0}" # anneal entropy -> 0: explore early, exploit late
+ANNEAL_LR="${ANNEAL_LR:-1}"             # also decay the learning rate (sharpen late exploitation)
 # Convergence (so it SETTLES and early-stops once Δ is stable):
 PATIENCE="${PATIENCE:-100}"
 DELTA_CONV_THRESH="${DELTA_CONV_THRESH:-0.01}"
@@ -102,6 +104,8 @@ python experiments/ppo.py \
     --init-concentration "$INIT_CONC" \
     --init-weight-scale "$INIT_WSCALE" \
     --ent-coef "$ENT_COEF" \
+    --ent-coef-final "$ENT_COEF_FINAL" \
+    $([ "$ANNEAL_LR" = "1" ] && echo --anneal-lr) \
     --convergence-mode delta \
     --convergence-patience "$PATIENCE" \
     --delta-convergence-threshold "$DELTA_CONV_THRESH" \

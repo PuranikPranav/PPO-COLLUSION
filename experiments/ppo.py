@@ -1095,6 +1095,23 @@ def train_session(env, benchmarks, args, session_id, device):
             for fid, agent in agents.items()
         }
 
+        # ---------- exploration schedule: explore early, exploit late ----------
+        # The Beta concentration is LEARNED (the policy naturally sharpens as it gets
+        # confident), but a FIXED entropy bonus fights that. Linearly anneal the entropy
+        # coefficient (and optionally the learning rate) from start -> final across
+        # training, so the agents sample broadly at first and increasingly exploit the
+        # learned policy as timesteps accumulate.
+        frac = update / max(1, num_updates - 1)
+        ent_final = args.ent_coef if args.ent_coef_final is None else args.ent_coef_final
+        ent_now = float(args.ent_coef + (ent_final - args.ent_coef) * frac)
+        if args.anneal_lr:
+            lr_now = float(args.lr * (1.0 - frac))
+            for agent in agents.values():
+                for pg in agent.optimizer.param_groups:
+                    pg["lr"] = lr_now
+        else:
+            lr_now = float(args.lr)
+
         # ---------- PPO update ----------
         for fid, agent in agents.items():
             obs_norm = obs_normalizers[fid].normalize(obs[fid])
@@ -1102,7 +1119,7 @@ def train_session(env, benchmarks, args, session_id, device):
             agent.update(
                 last_val=last_val, gamma=args.gamma, gae_lambda=args.gae_lambda,
                 clip_eps=args.clip_eps, epochs=args.ppo_epochs,
-                minibatch_size=args.minibatch_size, ent_coef=args.ent_coef,
+                minibatch_size=args.minibatch_size, ent_coef=ent_now,
                 vf_coef=args.vf_coef, max_grad_norm=args.max_grad_norm,
             )
 
@@ -1213,6 +1230,8 @@ def train_session(env, benchmarks, args, session_id, device):
                 "avg_lmp": float(avg_lmp),
                 "wall_sec": time.time() - wall_start,
                 "delta_combined": float(delta_combined_now),
+                "ent_coef_now": ent_now,
+                "lr_now": lr_now,
             }
             for fid in range(NUM_FIRMS):
                 avg_step_prof = (
@@ -1512,7 +1531,15 @@ def parse_args():
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-eps", type=float, default=0.2)
-    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--ent-coef", type=float, default=0.01,
+                   help="Entropy bonus (exploration). Starting value when annealing.")
+    p.add_argument("--ent-coef-final", type=float, default=None,
+                   help="If set, LINEARLY ANNEAL the entropy coefficient from --ent-coef "
+                        "to this value over training: high exploration early -> exploitation "
+                        "late. Unset = constant --ent-coef (no schedule).")
+    p.add_argument("--anneal-lr", action="store_true", default=False,
+                   help="Linearly decay the learning rate to 0 over training (standard PPO "
+                        "schedule; sharpens late-stage exploitation/convergence).")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--hidden-dim", type=int, default=64)
