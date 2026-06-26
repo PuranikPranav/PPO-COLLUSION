@@ -387,11 +387,20 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
         )
 
     fig1, ax1 = plt.subplots(figsize=(10, 5))
+    has_spread = _metrics_has_key(sessions, "firm_0_gen_lo")
     for fid in range(2):
         steps, mean, std = aggregate_metric(sessions, gkey.format(fid), max_steps=max_steps)
         if not steps:
             continue
         c = f"C{fid}"
+        # Faint envelope of what the agents ACTUALLY sampled (true exploration), so the
+        # figure isn't read as just the smoothed greedy center.
+        if has_spread:
+            xs, lo, _ = aggregate_metric(sessions, f"firm_{fid}_gen_lo", max_steps=max_steps)
+            _, hi, _ = aggregate_metric(sessions, f"firm_{fid}_gen_hi", max_steps=max_steps)
+            if xs:
+                ax1.fill_between(xs, lo, hi, color=c, alpha=0.07,
+                                 label=("sampled range (exploration)" if fid == 0 else None))
         ax1.plot(steps, mean, color=c, label=f"Firm {fid} (greedy mean MW)" if use_greedy else f"Firm {fid}")
         if len(sessions) > 1:
             ax1.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
@@ -466,6 +475,34 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
     fig2.savefig(out2, dpi=150, bbox_inches="tight")
     plt.close(fig2)
     print(f"Saved → {out2}")
+
+    # -------- Figure 3: average clearing price (LMP) vs time --------
+    fig3, ax3 = plt.subplots(figsize=(10, 5))
+    steps, mean, std = aggregate_metric(sessions, "avg_lmp", max_steps=max_steps)
+    if steps:
+        ax3.plot(steps, mean, color="purple", lw=1.8, label="Avg LMP (clearing price)")
+        if len(sessions) > 1:
+            ax3.fill_between(steps, mean - std, mean + std, alpha=0.15, color="purple")
+    bench = config.get("benchmarks", {})
+    for key, ls, col, nm in (("competitive", "--", "grey", "Competitive"),
+                             ("cournot_nash", "-.", "green", "Nash"),
+                             ("monopoly", ":", "black", "Monopoly")):
+        v = bench.get(key, {}).get("avg_lmp")
+        if v is not None:
+            ax3.axhline(float(v), ls=ls, color=col, lw=1.2, alpha=0.9, label=f"{nm} (${float(v):.1f})")
+    ax3.set_xlim(0, max_steps)
+    ax3.set_xticks(CALVANO_XTICKS)
+    ax3.xaxis.set_major_formatter(_calvano_xtick_formatter())
+    ax3.set_xlabel("Timesteps")
+    ax3.set_ylabel("Average LMP ($/MWh)")
+    ax3.set_title("Average clearing price vs time (starts competitive at t=0)")
+    ax3.legend(fontsize=8, loc="best")
+    fig3.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
+    fig3.tight_layout()
+    out3 = save_dir / f"calvano_fig3_lmp_h{h}.png"
+    fig3.savefig(out3, dpi=150, bbox_inches="tight")
+    plt.close(fig3)
+    print(f"Saved → {out3}")
 
 
 def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
@@ -1594,6 +1631,84 @@ def plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir: Path, history
     print(f"Saved → {out}")
 
 
+def plot_exploration_funnel(config, sessions, save_dir: Path, history_label=None):
+    """Per-firm exploration funnel: the ACTUAL within-rollout sampled-output spread
+    (min–max shaded + ±std), wide early (haphazard exploration) and narrowing late
+    (exploitation). Starts at the competitive t=0 anchor.
+
+    Uses firm_*_gen_lo/hi/std — what the agents actually TRIED — not the smoothed greedy
+    center or cross-session variance. Produces a full-range figure and an 'extremely
+    zoomed' figure (tight y around the Nash↔Monopoly collusion band) for the advisor.
+    """
+    if not sessions:
+        print("No sessions for exploration funnel.")
+        return
+    if not _metrics_has_key(sessions, "firm_0_gen_std"):
+        print("No sampled-spread metrics (firm_*_gen_std). Re-run ppo.py (it logs them now).")
+        return
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    bench = config.get("benchmarks", {})
+    caps = (200.0, 100.0)
+
+    def lvl(key, fid):
+        g = bench.get(key, {}).get("gens")
+        if not g:
+            return None
+        return g[0] + g[1] if fid == 0 else g[2]
+
+    def agg(fid, k):
+        steps, mean, _ = aggregate_metric(sessions, f"firm_{fid}_{k}")
+        return np.asarray(steps, float), np.asarray(mean, float)
+
+    for zoom in (False, True):
+        fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+        for fid, ax in enumerate(axes):
+            x, center = agg(fid, "avg_gen")
+            _, lo = agg(fid, "gen_lo")
+            _, hi = agg(fid, "gen_hi")
+            _, sd = agg(fid, "gen_std")
+            c = f"C{fid}"
+            mlh = np.isfinite(lo) & np.isfinite(hi)
+            ax.fill_between(x[mlh], lo[mlh], hi[mlh], color=c, alpha=0.12,
+                            label="sampled range (min–max per rollout)")
+            ms = np.isfinite(sd) & np.isfinite(center)
+            ax.fill_between(x[ms], (center - sd)[ms], (center + sd)[ms], color=c, alpha=0.30,
+                            label="±1 std (exploration width)")
+            ax.plot(x, center, color=c, lw=2.0, label=f"Firm {fid} mean sampled output")
+            comp, nash, mono = lvl("competitive", fid), lvl("cournot_nash", fid), lvl("monopoly", fid)
+            for v, ls, col, nm in ((comp, "--", "grey", "Competitive"),
+                                   (nash, "-.", "green", "Nash"),
+                                   (mono, ":", "black", "Monopoly")):
+                if v is not None:
+                    ax.axhline(v, ls=ls, color=col, lw=1.2, alpha=0.9, label=f"{nm} ({v:.0f})")
+            if len(center):
+                ax.scatter([x[0]], [center[0]], color="red", zorder=6, s=45,
+                           label=f"t=0 competitive ({center[0]:.0f} MW)")
+            settled = float(np.nanmean(center[-max(1, len(center) // 5):])) if len(center) else 0.0
+            if zoom:
+                vals = [v for v in (nash, mono, settled) if v is not None]
+                pad = 10
+                ax.set_ylim(min(vals) - pad, max(vals) + pad)
+                ax.set_title(f"Firm {fid} — ZOOM on the Nash↔Monopoly band   (settled ≈ {settled:.0f} MW)")
+            else:
+                ax.set_ylim(-4, caps[fid] + 6)
+                ax.set_title(f"Firm {fid} — exploration funnel: wide (explore) → narrow (exploit)")
+            ax.set_ylabel("Generation (MW)")
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=7.5, loc="best")
+        axes[1].set_xlabel("Timesteps")
+        ttl = ("Exploration funnel — ZOOMED to the collusion band" if zoom
+               else "Exploration funnel — explore-everywhere, then settle")
+        fig.suptitle(f"{ttl}  (H={h}, {n} sessions)", fontsize=13)
+        fig.tight_layout()
+        save_dir.mkdir(parents=True, exist_ok=True)
+        out = save_dir / f"exploration_funnel{'_zoom' if zoom else ''}_h{h}.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved → {out}")
+
+
 # ====================== Main ======================
 def main():
     parser = argparse.ArgumentParser(description="Calvano-style plots for PPO collusion")
@@ -1635,6 +1750,14 @@ def main():
         action="store_true",
         help="Per-firm profit vs PPO iteration with each firm's own competitive/Nash/monopoly "
         "lines (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--exploration-funnel",
+        action="store_true",
+        help="Per-firm exploration funnel from the ACTUAL sampled-output spread "
+        "(firm_*_gen_lo/hi/std): wide haphazard exploration narrowing to exploitation. "
+        "Writes a full-range PNG and an extremely-zoomed PNG (tight on the Nash↔Monopoly "
+        "band) per run dir.",
     )
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
@@ -1710,6 +1833,17 @@ def main():
             config, sessions = load_sessions(rd)
             h = config.get("history_len", "?")
             plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.exploration_funnel:
+        if not args.save:
+            parser.error("--exploration-funnel requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_exploration_funnel(config, sessions, save_dir, history_label=h)
         return
 
     for rd in run_dirs:

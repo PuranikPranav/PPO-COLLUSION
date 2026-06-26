@@ -118,10 +118,16 @@ python experiments/ppo.py \
     --cuda \
     --output-dir "${RESULTS_ROOT}/h${H}"
 
-# Plots that tell the story: quantity-vs-time (with Competitive/Nash/Monopoly lines),
-# Δ-vs-time (0=Nash, 1=Monopoly), per-firm profit, variance funnel, and the
-# deviation/punishment figure.
+# Plots that tell the story. All start at the competitive t=0 anchor and carry the
+# Competitive/Nash/Monopoly references so they are directly comparable:
+#   calvano-paper      -> fig1 quantities (+ real sampled-range envelope), fig2 Δ, fig3 LMP
+#   exploration-funnel -> the wide-explore -> narrow-exploit funnel + an EXTREME ZOOM on
+#                         the Nash<->Monopoly band (the advisor figure)
+#   per-firm-profit    -> each firm's profit vs its own benchmarks
+#   variance-funnel    -> cross-session fan-out
+#   deviation-explainer-> the punishment / retaliation figure
 python experiments/plot_results.py "${RESULTS_ROOT}/h${H}" --save "$FIGURES_ROOT" --calvano-paper
+python experiments/plot_results.py "${RESULTS_ROOT}/h${H}" --save "$FIGURES_ROOT" --exploration-funnel  || true
 python experiments/plot_results.py "${RESULTS_ROOT}/h${H}" --save "$FIGURES_ROOT" --per-firm-profit     || true
 python experiments/plot_results.py "${RESULTS_ROOT}/h${H}" --save "$FIGURES_ROOT" --variance-funnel     || true
 python experiments/plot_results.py "${RESULTS_ROOT}/h${H}" --save "$FIGURES_ROOT" --deviation-explainer || true
