@@ -992,6 +992,10 @@ def train_session(env, benchmarks, args, session_id, device):
 
     # Logging
     log_rows = []
+    record_samples = getattr(args, "record_samples", False)
+    sample_x = []
+    sample_y = {f: [] for f in range(NUM_FIRMS)}
+    sample_ent = []
     obs = env.reset()
     total_steps = 0
     episode_count = 0
@@ -1065,6 +1069,12 @@ def train_session(env, benchmarks, args, session_id, device):
                         info["gen"].get(pidx, 0) for pidx in FIRM_PLANT_IDX[fid]
                     )
                     recent_gens[fid].append(gen_total)
+
+            if record_samples:
+                sample_x.append(total_steps)
+                for fid in range(NUM_FIRMS):
+                    sample_y[fid].append(float(np.sum(actions_mw[fid])))
+                sample_ent.append(ent_now if "ent_now" in dir() else float("nan"))
 
             obs = obs_next
             total_steps += 1
@@ -1337,6 +1347,16 @@ def train_session(env, benchmarks, args, session_id, device):
         final_avg_step, pi_nash, pi_mono
     )
 
+    if record_samples and sample_x:
+        import os
+        os.makedirs(args.output_dir, exist_ok=True)
+        np.savez(
+            os.path.join(args.output_dir, f"samples_session_{session_id}.npz"),
+            x=np.array(sample_x),
+            ent=np.array(sample_ent, dtype=float),
+            **{f"firm_{f}": np.array(sample_y[f]) for f in range(NUM_FIRMS)},
+        )
+
     return {
         "session_id": session_id,
         "seed": seed,
@@ -1548,6 +1568,10 @@ def parse_args():
     p.add_argument("--anneal-lr", action="store_true", default=False,
                    help="Linearly decay the learning rate to 0 over training (standard PPO "
                         "schedule; sharpens late-stage exploitation/convergence).")
+    p.add_argument("--record-samples", action="store_true", default=False,
+                   help="Record every per-step SAMPLED generation to output-dir/"
+                        "samples_session_<id>.npz (for the haphazard-exploration scatter). "
+                        "Use with --num-sessions 1.")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--hidden-dim", type=int, default=64)
