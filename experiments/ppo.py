@@ -1240,10 +1240,18 @@ def train_session(env, benchmarks, args, session_id, device):
                     else 0.0
                 )
                 avg_gen = float(np.mean(recent_gens[fid])) if recent_gens[fid] else 0.0
+                # Within-rollout spread of the SAMPLED generation = the actual exploration
+                # width (how widely the agent is trying different outputs this rollout).
+                gen_std = float(np.std(recent_gens[fid])) if recent_gens[fid] else 0.0
+                gen_lo = float(np.min(recent_gens[fid])) if recent_gens[fid] else 0.0
+                gen_hi = float(np.max(recent_gens[fid])) if recent_gens[fid] else 0.0
                 mock_ep_prof = avg_step_prof * args.episode_len
                 row[f"firm_{fid}_ep_profit"] = mock_ep_prof
                 row[f"firm_{fid}_avg_step_profit"] = avg_step_prof
                 row[f"firm_{fid}_avg_gen"] = avg_gen
+                row[f"firm_{fid}_gen_std"] = gen_std
+                row[f"firm_{fid}_gen_lo"] = gen_lo
+                row[f"firm_{fid}_gen_hi"] = gen_hi
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
                 if args.policy_kl_lag > 0:
                     row[f"firm_{fid}_kl_lag"] = last_agent_kls_lag.get(fid, float("nan"))
