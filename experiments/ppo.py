@@ -1032,6 +1032,10 @@ def train_session(env, benchmarks, args, session_id, device):
         "convergence_mode": args.convergence_mode,
         "early_stop_active": use_convergence,
         "avg_lmp": float(comp_b["avg_lmp"]),
+        # No within-rollout spread at the competitive anchor: the band starts as a point.
+        "lmp_lo": float(comp_b["avg_lmp"]),
+        "lmp_hi": float(comp_b["avg_lmp"]),
+        "lmp_std": 0.0,
         "delta_combined": float(comp_delta),
         "greedy_delta_combined": float(comp_delta),
     }
@@ -1231,6 +1235,12 @@ def train_session(env, benchmarks, args, session_id, device):
         )
         if log_now:
             avg_lmp = np.mean(recent_lmps) if recent_lmps else 0
+            # Within-rollout spread of the clearing price = the price-side exploration
+            # envelope, logged exactly like the per-firm generation spread so the LMP
+            # figure can show the same "wide sampling → narrow exploitation" shading.
+            lmp_std = float(np.std(recent_lmps)) if recent_lmps else 0.0
+            lmp_lo = float(np.min(recent_lmps)) if recent_lmps else float(avg_lmp)
+            lmp_hi = float(np.max(recent_lmps)) if recent_lmps else float(avg_lmp)
             gr = compute_greedy_metrics_from_obs(
                 env, agents, rollout_obs_backup, pi_nash, pi_mono
             )
@@ -1238,6 +1248,9 @@ def train_session(env, benchmarks, args, session_id, device):
                 "step": total_steps,
                 "episodes": episode_count,
                 "avg_lmp": float(avg_lmp),
+                "lmp_lo": lmp_lo,
+                "lmp_hi": lmp_hi,
+                "lmp_std": lmp_std,
                 "wall_sec": time.time() - wall_start,
                 "delta_combined": float(delta_combined_now),
                 "ent_coef_now": ent_now,
