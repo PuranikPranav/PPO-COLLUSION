@@ -1157,7 +1157,9 @@ def _print_progress_line(
     if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
         kl_extra = f" KL_lag{args.policy_kl_lag}={mkl:.2e}"
 
-    use_conv = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    use_conv = args.convergence_patience > 0 and args.convergence_mode in (
+        "delta", "kl", "strategy",
+    )
     if args.log_format == "legacy":
         print(
             f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
@@ -1174,7 +1176,7 @@ def _print_progress_line(
     elif args.convergence_mode == "none":
         sm = "none"
     else:
-        sm = "inactive"  # delta/kl but patience=0
+        sm = "inactive"  # mode set but patience=0
     dj = delta_max_jump if math.isfinite(delta_max_jump) else float("nan")
     kc = kl_for_convergence if math.isfinite(kl_for_convergence) else float("nan")
     parts = [
