@@ -1113,7 +1113,9 @@ def _print_paper_vs_ppo_banner():
 
 
 def _print_session_convergence_banner(args, session_id: int):
-    use = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    use = args.convergence_patience > 0 and args.convergence_mode in (
+        "delta", "kl", "strategy",
+    )
     print(
         "\n--- Convergence / logging ---\n"
         f"  convergence_mode={args.convergence_mode}\n"
@@ -1121,8 +1123,10 @@ def _print_session_convergence_banner(args, session_id: int):
         f"(patience={args.convergence_patience} PPO updates; ignored when mode=none)\n"
         f"  delta_convergence_threshold={args.delta_convergence_threshold}\n"
         f"  kl_threshold={args.kl_threshold}  policy_kl_lag={args.policy_kl_lag}\n"
+        f"  strategy_tol_mw={args.strategy_tol_mw}\n"
         "  streak counts consecutive PPO updates satisfying the *active* mode only "
-        "(delta: |Δ_comb−Δ_comb,prev|; kl: max_f KL per --policy-kl-lag). "
+        "(delta: |Δ_comb−Δ_comb,prev|; kl: max_f KL per --policy-kl-lag; "
+        "strategy: max probe-output move < strategy_tol_mw). "
         "Printed KL is for monitoring in all modes.\n"
         "---\n"
     )
@@ -1191,6 +1195,9 @@ def _print_progress_line(
         parts.append(f"KL_lag_k={mkl:.2e}")
     parts.append(f"d_jump={dj:.4g}" if math.isfinite(dj) else "d_jump=NA")
     parts.append(f"kl_for_conv={kc:.4g}" if math.isfinite(kc) else "kl_for_conv=NA")
+    smv = row.get("strategy_move_mw", float("nan"))
+    if isinstance(smv, float) and math.isfinite(smv):
+        parts.append(f"strat_move={smv:.2f}MW")
     parts.append(f"streak_metric={sm}")
     if use_conv:
         parts.append(f"streak={stable_count}/{args.convergence_patience}")
@@ -1238,20 +1245,37 @@ def train_session(env, benchmarks, args, session_id, device):
             )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
-    # Early stopping: Δ-stability, policy KL, or none (--convergence-mode)
+    # Early stopping: Δ-stability, policy KL, limit-strategy stability, or none
     use_convergence = args.convergence_patience > 0 and args.convergence_mode in (
         "delta",
         "kl",
+        "strategy",
     )
     conv_delta = args.convergence_mode == "delta"
     conv_kl = args.convergence_mode == "kl"
+    conv_strategy = args.convergence_mode == "strategy"
     stable_count = 0
     last_delta_max_jump = float("nan")
     last_kl_for_convergence = float("nan")
+    last_strategy_move = float("nan")
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
     last_agent_kls_lag = {fid: float("nan") for fid in range(NUM_FIRMS)}
     policy_ckpt_hist = {fid: [] for fid in agents}
     prev_delta_combined = None
+    prev_probe_outputs = None
+
+    # STRATEGY mode: the PPO analogue of the paper's "greedy strategy unchanged
+    # for 100k periods" — probe the DETERMINISTIC policy on a FIXED grid of
+    # price-states (the same states the Fig-3 limit strategy is computed on,
+    # including off-path low prices where the punishment slope lives) and stop
+    # only when the probed outputs stop moving. Deterministic probes are immune
+    # to demand-shock noise; Δ-mode sees only on-path profits.
+    strategy_probe_public = None
+    if conv_strategy:
+        _targets = _benchmark_lmp_grid(benchmarks, num_points=20)
+        strategy_probe_public = [
+            _public_vector_with_scaled_lmps(env, t) for t in _targets
+        ]
 
     # Logging
     log_rows = []
@@ -1382,7 +1406,11 @@ def train_session(env, benchmarks, args, session_id, device):
         ent_final = args.ent_coef if args.ent_coef_final is None else args.ent_coef_final
         ent_now = float(args.ent_coef + (ent_final - args.ent_coef) * frac)
         if args.anneal_lr:
-            lr_now = float(args.lr * (1.0 - frac))
+            # Anneal to --lr-final (an LR FLOOR) when set, else to 0. With a
+            # floor, late-stage convergence must be EARNED under continued
+            # meaningful updates rather than scheduled by a vanishing LR.
+            lr_final = float(args.lr_final) if args.lr_final is not None else 0.0
+            lr_now = float(args.lr + (lr_final - args.lr) * frac)
             for agent in agents.values():
                 for pg in agent.optimizer.param_groups:
                     pg["lr"] = lr_now
@@ -1487,6 +1515,31 @@ def train_session(env, benchmarks, args, session_id, device):
 
         prev_delta_combined = delta_combined_now
 
+        # ---------- limit-strategy stability (strategy mode) ----------
+        if conv_strategy:
+            cur_probe = {}
+            for fid, agent in agents.items():
+                outs = np.empty(len(strategy_probe_public), dtype=np.float64)
+                for i, pv in enumerate(strategy_probe_public):
+                    o = _per_firm_reference_obs(env, pv, fid)
+                    outs[i] = float(np.sum(
+                        agent.deterministic_action(obs_normalizers[fid].normalize(o))
+                    ))
+                cur_probe[fid] = outs
+            if prev_probe_outputs is not None:
+                last_strategy_move = float(max(
+                    np.max(np.abs(cur_probe[f] - prev_probe_outputs[f]))
+                    for f in cur_probe
+                ))
+                if use_convergence:
+                    if last_strategy_move < args.strategy_tol_mw:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                    if stable_count >= args.convergence_patience:
+                        converged = True
+            prev_probe_outputs = cur_probe
+
         # ---------- logging ----------
         # A metrics row is recorded EVERY update (so the plotted solid lines are
         # near-continuous even on 2M-step sessions); --log-interval only throttles
@@ -1568,6 +1621,7 @@ def train_session(env, benchmarks, args, session_id, device):
             row["delta_combined_jump"] = float(last_delta_max_jump)
             row["delta_max_jump"] = float(last_delta_max_jump)
             row["kl_for_convergence"] = float(last_kl_for_convergence)
+            row["strategy_move_mw"] = float(last_strategy_move)
             row["ppo_update"] = update + 1
             row["ppo_updates_total"] = num_updates
             row["convergence_mode"] = args.convergence_mode
@@ -1606,6 +1660,11 @@ def train_session(env, benchmarks, args, session_id, device):
                         f"KL(intra-update) < {args.kl_threshold} "
                         f"for {args.convergence_patience} consecutive updates"
                     )
+            elif conv_strategy:
+                msg = (
+                    f"limit strategy moved < {args.strategy_tol_mw} MW on the "
+                    f"probe grid for {args.convergence_patience} consecutive updates"
+                )
             else:
                 msg = (
                     f"|Δ_comb−Δ_comb,prev| < {args.delta_convergence_threshold} "
@@ -1927,8 +1986,14 @@ def parse_args():
                         "to this value over training: high exploration early -> exploitation "
                         "late. Unset = constant --ent-coef (no schedule).")
     p.add_argument("--anneal-lr", action="store_true", default=False,
-                   help="Linearly decay the learning rate to 0 over training (standard PPO "
-                        "schedule; sharpens late-stage exploitation/convergence).")
+                   help="Linearly decay the learning rate over training (standard PPO "
+                        "schedule; sharpens late-stage exploitation/convergence). Decays "
+                        "to 0 unless --lr-final sets a floor.")
+    p.add_argument("--lr-final", type=float, default=None,
+                   help="LR FLOOR for --anneal-lr (e.g. 3e-5 = 10%% of the default LR). "
+                        "With a floor, convergence must be earned under continued "
+                        "meaningful updates instead of being scheduled by a vanishing LR. "
+                        "Recommended with --convergence-mode strategy.")
     p.add_argument("--record-samples", action="store_true", default=False,
                    help="Record every per-step SAMPLED generation to output-dir/"
                         "samples_session_<id>.npz (for the haphazard-exploration scatter). "
@@ -1944,10 +2009,21 @@ def parse_args():
         "--convergence-mode",
         type=str,
         default="delta",
-        choices=("delta", "kl", "none"),
+        choices=("delta", "kl", "strategy", "none"),
         help="delta: stop when |Δ_comb−Δ_comb,prev| < --delta-convergence-threshold for "
         "--convergence-patience updates. kl: same with policy KL vs --kl-threshold. "
+        "strategy: LIMIT-STRATEGY stability — the deterministic policy probed on a "
+        "fixed grid of price-states (incl. off-path low prices) must move less than "
+        "--strategy-tol-mw for patience updates; the PPO analogue of the paper's "
+        "'greedy strategy unchanged for 100k periods', immune to demand-shock noise. "
         "none: never early-stop on convergence (run full --total-timesteps; patience ignored).",
+    )
+    p.add_argument(
+        "--strategy-tol-mw",
+        type=float,
+        default=0.75,
+        help="strategy mode: max MW movement of any firm's probed deterministic "
+        "output between consecutive updates counted as 'unchanged'.",
     )
     p.add_argument(
         "--convergence-patience",

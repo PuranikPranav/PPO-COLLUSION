@@ -48,6 +48,9 @@ SHOCK_PERSIST="${SHOCK_PERSIST:-0.5}"    # 0.5 = i.i.d. (paper); 0.9 = persisten
 ENT_COEF="${ENT_COEF:-0.02}"
 ENT_COEF_FINAL="${ENT_COEF_FINAL:-0.003}"  # entropy FLOOR: keep off-path states sampled
 GAMMA="${GAMMA:-0.99}"
+CONV_MODE="${CONV_MODE:-delta}"          # delta | kl | strategy | none
+STRATEGY_TOL="${STRATEGY_TOL:-0.75}"     # strategy mode: MW tolerance on the probe grid
+LR_FINAL="${LR_FINAL:-}"                 # LR floor (e.g. 3e-5); empty = anneal to 0
 DEV_LEN="${DEV_LEN:-1}"                  # 1 = paper's one-period forced cheat
 SEED="${SEED:-42}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/gp_twofirm}"
@@ -95,8 +98,10 @@ python -u experiments/ppo.py \
     --ent-coef "$ENT_COEF" \
     --ent-coef-final "$ENT_COEF_FINAL" \
     --anneal-lr \
+    $([ -n "$LR_FINAL" ] && echo --lr-final "$LR_FINAL") \
     --gamma "$GAMMA" \
-    --convergence-mode delta \
+    --convergence-mode "$CONV_MODE" \
+    --strategy-tol-mw "$STRATEGY_TOL" \
     --convergence-patience 100 \
     --delta-convergence-threshold 0.01 \
     --log-format structured \
