@@ -13,6 +13,10 @@
 #SBATCH --output=slurm-gp-%j.out
 #SBATCH --error=slurm-gp-%j.err
 #
+# Live logs: without this, Python fully-buffers stdout when writing to a Slurm
+# .out file, so the banner appears and then nothing until the buffer fills.
+export PYTHONUNBUFFERED=1
+#
 # GREEN-PORTER / IMPERFECT-MONITORING run (Calvano et al. 2021 adaptation):
 # two-firm market, unobserved i.i.d. demand shocks, price(+own-output) state.
 # The deviation experiment runs automatically per frozen demand state and the
@@ -77,7 +81,7 @@ echo "#  H=${H} sessions=${SESSIONS} timesteps=${TIMESTEPS} ent=${ENT_COEF}->${E
 echo "#  results -> ${RESULTS_ROOT}   figures -> ${FIGURES_ROOT}"
 echo "####################################################################"
 
-python experiments/ppo.py \
+python -u experiments/ppo.py \
     --history-len "$H" \
     --num-sessions "$SESSIONS" \
     --total-timesteps "$TIMESTEPS" \
