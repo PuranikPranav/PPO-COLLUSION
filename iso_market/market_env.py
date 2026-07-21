@@ -14,22 +14,28 @@ efficiently at each step with warm-starting.
 import numpy as np
 import cvxpy as cp  # for DC-OPF convex maximization
 
-from iso_market.node_network import P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC, QC
+from iso_market.node_network import (
+    P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC, QC, CAP, PLANT_SPECS, MARKET,
+)
 
 # ---------------------------------------------------------------------------
-# Plant registry — derived from node_network constants
+# Plant registry — built generically from node_network.PLANT_SPECS, so the
+# same code runs the three-firm hub market (default) and the two-firm
+# companion market (MARKET_CONFIG=two_firm).
 # ---------------------------------------------------------------------------
 PLANTS = [
-    {"firm": 0, "node": 0, "mc": MC["Firm1_Node1"], "qc": QC["Firm1_Node1"], "cap": 150.0},
-    {"firm": 0, "node": 1, "mc": MC["Firm1_Node2"], "qc": QC["Firm1_Node2"], "cap":  50.0},
-    {"firm": 1, "node": 1, "mc": MC["Firm2_Node2"], "qc": QC["Firm2_Node2"], "cap": 100.0},
+    {"firm": f, "node": n, "mc": MC[key], "qc": QC[key], "cap": CAP[key]}
+    for f, n, key in PLANT_SPECS
 ]
 
-NUM_FIRMS = 2
+NUM_FIRMS = max(p["firm"] for p in PLANTS) + 1
 NUM_NODES = 5
 NUM_PLANTS = len(PLANTS)
 
-FIRM_PLANT_IDX = {0: [0, 1], 1: [2]}
+FIRM_PLANT_IDX = {
+    f: [i for i, p in enumerate(PLANTS) if p["firm"] == f]
+    for f in range(NUM_FIRMS)
+}
 
 # Public per-timestep market signals: LMPs (5) + line flows (5) + shadow prices (5).
 OBS_MARKET_FEATURES_PER_STEP = NUM_NODES + 10  # 15 when num_lines == 5
@@ -55,15 +61,55 @@ class ElectricityMarketEnv:
         episode_len: int = 168,
         include_past_gen: bool = True,
         include_prev_reward: bool = True,
+        obs_mode: str = "full",
+        demand_shock: float = 0.0,
+        shock_seed: int | None = None,
+        shock_persistence: float = 0.5,
     ):
         self.history_len = history_len
         # Kept for CLI/logging ("weeks"); step() does not terminate on episode_len.
         self.episode_len = episode_len
 
+        # ------------------------------------------------------------------
+        # IMPERFECT MONITORING (Green-Porter / Calvano et al. 2021):
+        #   demand_shock u > 0 → every period an i.i.d. shock u_t ∈ {−u, +u}
+        #   (equally likely) shifts ALL nodal inverse-demand intercepts:
+        #   p_i = (P0_i + u_t) − (P0_i/Q0_i)·d_i. The shock realizes AFTER firms
+        #   commit output and is NEVER observed — firms see only market signals,
+        #   so a low price may be a rival deviation OR an adverse demand shock.
+        #   Certainty equivalence (linear demand, symmetric i.i.d. shock) leaves
+        #   the Nash / monopoly benchmark outputs and EXPECTED profits at their
+        #   mean-demand values, so Δ calibration is unchanged.
+        #   obs_mode="price_only" → the state is last period's nodal LMPs ONLY
+        #   (paper baseline s_t = p_{t−1}): no flows, no shadow prices, no past
+        #   generation, no own reward.
+        # ------------------------------------------------------------------
+        #   obs_mode="price_own" → LMPs + OWN last total output (the paper's
+        #   variant s_i = {q_{i,t−1}, p_{t−1}}): punishment phases can persist as
+        #   a self-referential state loop instead of hanging off one price reading.
+        #   shock_persistence ρ → two-state Markov demand (stay-probability ρ);
+        #   0.5 = i.i.d. (paper baseline). Persistent shocks are natural for
+        #   electricity load.
+        self.obs_mode = str(obs_mode)
+        if self.obs_mode not in ("full", "price_only", "price_own"):
+            raise ValueError(
+                f"obs_mode must be 'full', 'price_only' or 'price_own', got {obs_mode!r}"
+            )
+        self.demand_shock = float(demand_shock)
+        self.shock_persistence = float(shock_persistence)
+        self._shock_rng = np.random.default_rng(shock_seed)
+        self._demand_u = 0.0          # current-period realized shock
+        self._demand_frozen = None    # None = stochastic; else fixed value
+
         # State-augmentation switches (Andrew's request):
         #   include_past_gen   → append last period's per-plant generation (public).
         #   include_prev_reward→ append each firm's OWN previous-period profit (private,
         #                        so observations become firm-specific).
+        # price_only / price_own modes override both (no rival quantities, no
+        # reward in the state — imperfect monitoring).
+        if self.obs_mode in ("price_only", "price_own"):
+            include_past_gen = False
+            include_prev_reward = False
         self.include_past_gen = bool(include_past_gen)
         self.include_prev_reward = bool(include_prev_reward)
 
@@ -74,13 +120,16 @@ class ElectricityMarketEnv:
         self.num_lines = len(self.line_limits)
 
         # Public per-step block = market signals (+ optionally past generation).
-        self.public_features_per_step = OBS_MARKET_FEATURES_PER_STEP + (
-            NUM_PLANTS if self.include_past_gen else 0
-        )
-        # Full per-step features as seen by ONE firm (public block + own prev reward).
-        self.features_per_step = self.public_features_per_step + (
-            1 if self.include_prev_reward else 0
-        )
+        if self.obs_mode in ("price_only", "price_own"):
+            self.public_features_per_step = NUM_NODES  # LMPs only
+        else:
+            self.public_features_per_step = OBS_MARKET_FEATURES_PER_STEP + (
+                NUM_PLANTS if self.include_past_gen else 0
+            )
+        # Full per-step features as seen by ONE firm (public block + private tail:
+        # own prev reward in full mode, own prev total MW in price_own mode).
+        private_tail = 1 if (self.include_prev_reward or self.obs_mode == "price_own") else 0
+        self.features_per_step = self.public_features_per_step + private_tail
         self.obs_dim = history_len * self.features_per_step
 
         self.action_dims = {f: len(FIRM_PLANT_IDX[f]) for f in range(NUM_FIRMS)}
@@ -101,7 +150,8 @@ class ElectricityMarketEnv:
         print(
             f"[ElectricityMarketEnv] obs_dim={self.obs_dim} "
             f"(history_len={history_len}, features/step={self.features_per_step}; "
-            f"past_gen={self.include_past_gen}, prev_reward={self.include_prev_reward}) | "
+            f"mode={self.obs_mode}, past_gen={self.include_past_gen}, "
+            f"prev_reward={self.include_prev_reward}, demand_shock=±${self.demand_shock:.2f}) | "
             f"baseline avg LMP=${float(np.mean(self._baseline_public_vector[:NUM_NODES])):.2f}"
         )
 
@@ -185,21 +235,65 @@ class ElectricityMarketEnv:
         return self._assemble_public_vector(market, gens)
 
     def _assemble_public_vector(self, market_vec: np.ndarray, gens: np.ndarray) -> np.ndarray:
-        """Concatenate market signals with per-plant generation (if enabled)."""
+        """Concatenate market signals with per-plant generation (if enabled).
+
+        price_only mode: the public block is the nodal LMPs alone.
+        """
+        market_vec = np.asarray(market_vec, dtype=np.float64)
+        if self.obs_mode in ("price_only", "price_own"):
+            return market_vec[:NUM_NODES].copy()
         if self.include_past_gen:
             return np.concatenate([market_vec, np.asarray(gens, dtype=np.float64)])
-        return np.asarray(market_vec, dtype=np.float64)
+        return market_vec
+
+    # ------------------------------------------------------------------
+    # Demand-shock control (imperfect monitoring)
+    # ------------------------------------------------------------------
+    def freeze_demand(self, state):
+        """Freeze the demand shock for controlled experiments.
+
+        state: "high" (+u), "low" (−u), a numeric shock value, or None to
+        restore stochastic i.i.d. draws.
+        """
+        if state is None:
+            self._demand_frozen = None
+        elif state == "high":
+            self._demand_frozen = +self.demand_shock
+        elif state == "low":
+            self._demand_frozen = -self.demand_shock
+        else:
+            self._demand_frozen = float(state)
+
+    def _draw_demand_shock(self):
+        if self.demand_shock <= 0.0:
+            self._demand_u = 0.0
+        elif self._demand_frozen is not None:
+            self._demand_u = float(self._demand_frozen)
+        else:
+            rho = self.shock_persistence
+            if self._demand_u != 0.0 and rho != 0.5:
+                # Two-state Markov chain: keep the current sign w.p. rho.
+                stay = self._shock_rng.random() < rho
+                sign = np.sign(self._demand_u) if stay else -np.sign(self._demand_u)
+                self._demand_u = float(sign * self.demand_shock)
+            else:
+                self._demand_u = float(
+                    self._shock_rng.choice((-self.demand_shock, self.demand_shock))
+                )
 
     # ------------------------------------------------------------------
     # Parametric CVXPY (compiled once, re-solved with warm start)
     # ------------------------------------------------------------------
     def _build_cvxpy_problem(self):
         self._gen_param = cp.Parameter(NUM_NODES, nonneg=True)
+        # Inverse-demand intercept (P0 + demand shock); slope stays P0/Q0.
+        self._p0_param = cp.Parameter(NUM_NODES)
+        self._p0_param.value = self.P0.copy()
         self._d_var = cp.Variable(NUM_NODES, nonneg=True)
         y = self._gen_param - self._d_var
 
         benefit = cp.sum(
-            cp.multiply(self.P0, self._d_var)
+            cp.multiply(self._p0_param, self._d_var)
             - 0.5 * cp.multiply(self.P0 / self.Q0, cp.square(self._d_var))
         )
 
@@ -215,12 +309,16 @@ class ElectricityMarketEnv:
 
     def _clear_market(self, gen_per_node: np.ndarray):
         """
+        Clears at the CURRENT demand intercept (P0 + self._demand_u).
+
         Returns
         -------
         lmps, demand, flows, shadow_prices
         or (None, None, None, None) if infeasible.
         """
         self._gen_param.value = gen_per_node
+        p0_now = self.P0 + self._demand_u
+        self._p0_param.value = p0_now
         try:
             self._prob.solve(solver=cp.CLARABEL, warm_start=True)
         except Exception:
@@ -233,7 +331,7 @@ class ElectricityMarketEnv:
             return None, None, None, None
 
         demand = self._d_var.value
-        lmps = self.P0 - (self.P0 / self.Q0) * demand
+        lmps = p0_now - (self.P0 / self.Q0) * demand
         net_inj = self._gen_param.value - demand
         flows = self.ptdf @ net_inj
 
@@ -251,6 +349,7 @@ class ElectricityMarketEnv:
     # ------------------------------------------------------------------
     def reset(self):
         self.t = 0
+        self._demand_u = 0.0
         # Public per-step history seeded with the competitive baseline.
         self.obs_history = np.tile(
             self._baseline_public_vector, (self.history_len, 1)
@@ -258,6 +357,15 @@ class ElectricityMarketEnv:
         # Per-firm OWN-reward history, seeded with competitive per-firm profit.
         self.reward_history = {
             f: np.full(self.history_len, self._baseline_firm_reward[f], dtype=np.float64)
+            for f in range(NUM_FIRMS)
+        }
+        # Per-firm OWN-output history (price_own mode), seeded with baseline totals.
+        self.own_gen_history = {
+            f: np.full(
+                self.history_len,
+                float(sum(self._baseline_gens[p] for p in FIRM_PLANT_IDX[f])),
+                dtype=np.float64,
+            )
             for f in range(NUM_FIRMS)
         }
         return self._get_obs()
@@ -271,7 +379,15 @@ class ElectricityMarketEnv:
         """
         obs = {}
         for f in range(NUM_FIRMS):
-            if self.include_prev_reward:
+            if self.obs_mode == "price_own":
+                # [LMPs_step, own_total_MW_step] per history row (paper's
+                # imperfect-monitoring variant s_i = {q_{i,t−1}, p_{t−1}}).
+                rows = [
+                    np.concatenate([self.obs_history[h], [self.own_gen_history[f][h]]])
+                    for h in range(self.history_len)
+                ]
+                obs[f] = np.concatenate(rows).astype(np.float32)
+            elif self.include_prev_reward:
                 # Interleave per step: [public_step, own_reward_step] for each of the
                 # history_len rows, then flatten.
                 rows = [
@@ -302,6 +418,8 @@ class ElectricityMarketEnv:
                 gen_per_node[PLANTS[pidx]["node"]] += g
                 gen_per_plant[pidx] = g
 
+        # Demand shock realizes AFTER firms commit output (imperfect monitoring).
+        self._draw_demand_shock()
         lmps, demand, flows, shadow_prices = self._clear_market(gen_per_node)
 
         if lmps is None:
@@ -330,10 +448,13 @@ class ElectricityMarketEnv:
         # Roll public history and append the new period's public vector.
         self.obs_history = np.roll(self.obs_history, -1, axis=0)
         self.obs_history[-1] = obs_vec
-        # Roll each firm's own-reward history and append this period's reward.
+        # Roll each firm's own-reward and own-output histories.
         for fid in range(NUM_FIRMS):
             self.reward_history[fid] = np.roll(self.reward_history[fid], -1)
             self.reward_history[fid][-1] = rewards[fid]
+            own_total = float(sum(gen_per_plant.get(p, 0.0) for p in FIRM_PLANT_IDX[fid]))
+            self.own_gen_history[fid] = np.roll(self.own_gen_history[fid], -1)
+            self.own_gen_history[fid][-1] = own_total
 
         self.t += 1
         done = False  # Continuing task: market never closes (episode_len is for logging only)
@@ -348,5 +469,6 @@ class ElectricityMarketEnv:
             "gen": dict(gen_per_plant),
             "total_gen": sum(gen_per_plant.values()),
             "avg_lmp": avg_lmp,
+            "demand_u": float(self._demand_u),
         }
         return self._get_obs(), rewards, done, info

@@ -36,7 +36,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iso_market.market_env import ElectricityMarketEnv, NUM_FIRMS
+from iso_market.market_env import ElectricityMarketEnv, NUM_FIRMS, FIRM_PLANT_IDX
 from experiments.ppo import (
     compute_competitive_benchmark,
     compute_cournot_nash_benchmark,
@@ -94,6 +94,30 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
     metrics = []
     delta_history = []
     parse_failures = 0
+    transcripts = [] if args.save_transcripts else None
+
+    # ---------- t=0 anchor: the COMPETITIVE benchmark ----------
+    # Mirrors experiments/ppo.py: every plotted trajectory STARTS at the competitive
+    # generation / price / profit (the market the agents are "born into" — env.reset()
+    # seeds the observation history with exactly this baseline). Periods then log at
+    # step t+1, so the figures read: t=0 -> competition, t>=1 -> what the LLM chooses.
+    comp_b = benchmarks["competitive"]
+    comp_profits = {f: float(comp_b["profits"][str(f)]) for f in range(NUM_FIRMS)}
+    anchor = {
+        "step": 0,
+        "ppo_update": 0,
+        "ppo_updates_total": args.num_periods,
+        "avg_lmp": float(comp_b["avg_lmp"]),
+        "delta_combined": float(
+            compute_combined_delta(comp_profits, pi_nash, pi_mono)
+        ),
+    }
+    for f in range(NUM_FIRMS):
+        anchor[f"firm_{f}_avg_gen"] = float(
+            sum(comp_b["gens"][pidx] for pidx in FIRM_PLANT_IDX[f])
+        )
+        anchor[f"firm_{f}_avg_step_profit"] = comp_profits[f]
+    metrics.append(anchor)
 
     for t in range(args.num_periods):
         if t < args.warmup_competitive:
@@ -107,9 +131,11 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
             }
         else:
             # Build prompts -> ONE batched LLM call -> parse JSON -> MW per firm.
+            # ``period=t`` gates --goals-start (asymmetric goals switch on at T).
             actions_mw, parsed_by_firm = select_actions_llm(
                 engine, env, obs, benchmarks, args, schemas, last_actions,
                 memories=memories, latest_state=latest_state, seed=base_seed + t,
+                period=t,
             )
         for f in range(NUM_FIRMS):
             if memories is not None:
@@ -133,8 +159,10 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
         delta_history.append(delta_now)
 
         # ---- Log a plot_results-compatible row ----
+        # INSTANTANEOUS realized values for this single period — no within-session
+        # averaging anywhere; the plot layer averages ACROSS sessions per step.
         row = {
-            "step": t,
+            "step": t + 1,  # t=0 is the competitive anchor row
             "ppo_update": t + 1,
             "ppo_updates_total": args.num_periods,
             "avg_lmp": avg_lmp,
@@ -144,6 +172,24 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
             row[f"firm_{f}_avg_gen"] = _firm_total_gen(gen, f)
             row[f"firm_{f}_avg_step_profit"] = per_firm_profit[f]
         metrics.append(row)
+
+        # ---- Qualitative evidence: the model's own words (per period) ----
+        if transcripts is not None and t >= args.warmup_competitive:
+            transcripts.append({
+                "period": t + 1,
+                "avg_lmp": avg_lmp,
+                "delta_combined": float(delta_now),
+                "firms": {
+                    str(f): {
+                        "mw": [float(v) for v in np.asarray(actions_mw[f]).ravel()],
+                        "profit": per_firm_profit[f],
+                        "reasoning": parsed_by_firm[f].get("reasoning", ""),
+                        "strategy": parsed_by_firm[f].get("strategy", ""),
+                        "parse_ok": bool(parsed_by_firm[f].get("parse_ok", False)),
+                    }
+                    for f in range(NUM_FIRMS)
+                },
+            })
 
         if args.verbose and (t % max(1, args.log_interval) == 0 or t == args.num_periods - 1):
             g0 = _firm_total_gen(gen, 0)
@@ -200,6 +246,8 @@ def run_session(env, engine, benchmarks, args, session_id, pi_nash, pi_mono):
         ),
         "limit_strategy": limit_strategy,
         "deviation_experiment": deviation_exp,
+        # Written to a separate transcripts.jsonl by main() (kept out of session.json).
+        "_transcripts": transcripts,
     }
 
 
@@ -249,6 +297,10 @@ def main(args):
     config = vars(args).copy()
     config["benchmarks"] = benchmarks
     config["agent_type"] = "llm_granite_ppo_parity" if args.ppo_parity else "llm_granite"
+    if args.goals:
+        # Asymmetric-objective (seeded-colluder) runs are labeled so figures/tables
+        # can't be mistaken for the emergent-collusion arms.
+        config["agent_type"] += "_asym_" + "+".join(args.goals)
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
@@ -261,6 +313,13 @@ def main(args):
 
         sess_dir = out_dir / "sessions" / f"session_{s}"
         sess_dir.mkdir(parents=True, exist_ok=True)
+        transcripts = result.pop("_transcripts", None)
+        if transcripts:
+            # One JSON object per period: the model's own reasoning/strategy text —
+            # the qualitative evidence of (non-)collusion to quote in the paper.
+            with open(sess_dir / "transcripts.jsonl", "w") as f:
+                for entry in transcripts:
+                    f.write(json.dumps(entry) + "\n")
         with open(sess_dir / "session.json", "w") as f:
             json.dump(result, f, indent=2)
 
@@ -272,6 +331,17 @@ def main(args):
             f"(stationary={'yes' if result.get('converged') else 'no'}) | "
             f"parse failures={result['parse_failures']}"
         )
+        de = result.get("deviation_experiment") or {}
+        for dstr, entry in de.items():
+            p = (entry or {}).get("punishment") or {}
+            if not p:
+                continue
+            verdict = "PUNISH" if p.get("punished") else "ACCOMMODATE"
+            print(
+                f"  Deviation (firm {dstr} cheats): rivals {verdict} "
+                f"(combined ΔMW={p.get('rival_output_increase_mw', 0):+.1f}, "
+                f"LMP drop=${p.get('lmp_drop', 0):.2f})"
+            )
 
     aggregate = {
         "num_sessions": args.num_sessions,
@@ -345,7 +415,23 @@ def parse_args():
                    help="RECOMMENDED for the collusion study: narrative history + carried "
                         "strategy note, which lets the model reason about price impact.")
     p.add_argument("--goal", type=str, default="own_profit",
-                   choices=("own_profit", "joint_profit"))
+                   choices=("own_profit", "joint_profit"),
+                   help="Default objective for EVERY firm (overridden per firm by --goals).")
+    p.add_argument(
+        "--goals", type=str, default=None,
+        help="Optional per-firm objectives, comma-separated (firm0,firm1). "
+             "Example: collude,own_profit = firm 0 is a seeded colluder (explicit "
+             "price-leader prompt) while firm 1 stays selfish — the 'what happens "
+             "if ONE agent colludes' treatment. joint_profit is the softer variant. "
+             "Each entry must be own_profit, joint_profit or collude.",
+    )
+    p.add_argument(
+        "--goals-start", type=int, default=0,
+        help="Period at which the per-firm --goals switch ON. Before this, every "
+             "firm plays the symmetric --goal objective (in-session baseline / "
+             "trial phase), giving a before/after contrast around the moment one "
+             "agent starts colluding. 0 = asymmetric goals from the first period.",
+    )
 
     # Post-hoc analysis: punishment / impulse-response + limit strategy
     # (analogues of experiments/ppo.run_deviation_experiment / compute_limit_strategy).
@@ -353,8 +439,9 @@ def parse_args():
                    help="Skip the deviation/punishment experiment (saves GPU time).")
     p.add_argument("--deviation-frac", type=float, default=0.2,
                    help="One-period forced over-production (fraction above the chosen output).")
-    p.add_argument("--deviation-warmup", type=int, default=8,
-                   help="Periods of normal play before the forced deviation.")
+    p.add_argument("--deviation-warmup", type=int, default=20,
+                   help="Periods of normal LLM play before the forced deviation "
+                        "(must be long enough for a tacit resting point; ≥ history window).")
     p.add_argument("--deviation-horizon", type=int, default=20,
                    help="Periods of normal play observed after the deviation (the punishment window).")
     p.add_argument("--deviation-pre", type=int, default=4,
@@ -375,13 +462,34 @@ def parse_args():
     p.set_defaults(include_past_gen=True, include_prev_reward=True)
 
     # System / logging
+    p.add_argument("--save-transcripts", action="store_true", default=True,
+                   help="Write each period's reasoning/strategy text to "
+                        "sessions/session_*/transcripts.jsonl (qualitative evidence).")
+    p.add_argument("--no-transcripts", dest="save_transcripts", action="store_false")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", type=str, default="results/llm_mock")
     p.add_argument("--log-interval", type=int, default=10)
     p.add_argument("--verbose", action="store_true", default=True)
     p.add_argument("--quiet", dest="verbose", action="store_false")
 
-    return p.parse_args()
+    args = p.parse_args()
+    # Normalize --goals into a length-NUM_FIRMS list (or leave None = use --goal).
+    if args.goals:
+        parts = [g.strip() for g in args.goals.split(",") if g.strip()]
+        allowed = {"own_profit", "joint_profit", "collude"}
+        bad = [g for g in parts if g not in allowed]
+        if bad:
+            p.error(f"--goals entries must be in {sorted(allowed)}; got {bad}")
+        if len(parts) == 1:
+            parts = parts * NUM_FIRMS
+        if len(parts) != NUM_FIRMS:
+            p.error(
+                f"--goals needs 1 or {NUM_FIRMS} entries (got {len(parts)}): {args.goals!r}"
+            )
+        args.goals = parts
+    else:
+        args.goals = None
+    return args
 
 
 if __name__ == "__main__":

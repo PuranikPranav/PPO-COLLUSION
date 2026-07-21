@@ -1,5 +1,6 @@
 """
-Calvano Fig. 4 impulse response — Firm 1 one-period quantity cheat, Firm 0 on policy.
+Calvano Fig. 4 impulse response — Firm 1 one-period quantity cheat, all rival
+firms (the non-deviators, combined) on policy.
 
 Protocol
 --------
@@ -42,7 +43,7 @@ from experiments.paths import DEFAULT_RUN_DIR_NAME, deviation_figures_dir, resol
 from experiments.stochastic_deviation import load_session_agents, load_or_warm_normalizers
 
 DEVIATOR_FID = 1
-NONDEVIATOR_FID = 0
+NONDEVIATOR_FIDS = [f for f in range(NUM_FIRMS) if f != DEVIATOR_FID]
 
 
 def firm_avg_nodal_lmp(lmps, fid: int) -> float:
@@ -81,7 +82,7 @@ def profit_firm(info, actions, fid: int) -> float:
 
 
 def apply_deviation(actions_policy: dict, mode: str, frac: float, env) -> dict:
-    """Manual Firm 1 deviation at t=0; Firm 0 keeps policy output."""
+    """Manual deviator bump at t=0; all rival firms keep policy output."""
     out = {fid: actions_policy[fid].copy() for fid in range(NUM_FIRMS)}
     if mode == "cap":
         for j, pidx in enumerate(FIRM_PLANT_IDX[DEVIATOR_FID]):
@@ -92,14 +93,15 @@ def apply_deviation(actions_policy: dict, mode: str, frac: float, env) -> dict:
             bumped[j] = min(bumped[j], PLANTS[pidx]["cap"])
         out[DEVIATOR_FID] = bumped
     elif mode == "static_br":
-        out[DEVIATOR_FID] = _static_best_response_mw(out[NONDEVIATOR_FID], env)
+        rival_mw = {fid: out[fid] for fid in NONDEVIATOR_FIDS}
+        out[DEVIATOR_FID] = _static_best_response_mw(rival_mw, env)
     else:
         raise ValueError(f"Unknown deviation mode: {mode}")
     return out
 
 
-def _static_best_response_mw(f0_mw: np.ndarray, env) -> np.ndarray:
-    """Grid search F1 MW to maximize profit given fixed F0 (one-period BR)."""
+def _static_best_response_mw(rival_mw: dict, env) -> np.ndarray:
+    """Grid search deviator MW to maximize profit given ALL rivals fixed."""
     caps = np.array([PLANTS[pidx]["cap"] for pidx in FIRM_PLANT_IDX[DEVIATOR_FID]])
     best_mw = caps.copy()
     best_pi = -np.inf
@@ -107,14 +109,16 @@ def _static_best_response_mw(f0_mw: np.ndarray, env) -> np.ndarray:
     for frac in grid:
         trial = frac * caps
         gen_node = np.zeros(5)
-        for j, pidx in enumerate(FIRM_PLANT_IDX[NONDEVIATOR_FID]):
-            gen_node[PLANTS[pidx]["node"]] += float(f0_mw[j])
+        for fid, mw in rival_mw.items():
+            for j, pidx in enumerate(FIRM_PLANT_IDX[fid]):
+                gen_node[PLANTS[pidx]["node"]] += float(mw[j])
         for j, pidx in enumerate(FIRM_PLANT_IDX[DEVIATOR_FID]):
             gen_node[PLANTS[pidx]["node"]] += float(trial[j])
         lmps, _, _, _ = env._clear_market(gen_node)
         if lmps is None:
             continue
-        acts = {NONDEVIATOR_FID: f0_mw, DEVIATOR_FID: trial}
+        acts = dict(rival_mw)
+        acts[DEVIATOR_FID] = trial
         info = {"lmps": lmps}
         pi = profit_firm(info, acts, DEVIATOR_FID)
         if pi > best_pi:
@@ -152,9 +156,14 @@ def run_firm1_impulse(
 
     def record_actual(info, actions):
         trace["lmp_dev_actual"].append(firm_avg_nodal_lmp(info["lmps"], DEVIATOR_FID))
-        trace["lmp_non_actual"].append(firm_avg_nodal_lmp(info["lmps"], NONDEVIATOR_FID))
+        trace["lmp_non_actual"].append(float(np.mean(
+            [firm_avg_nodal_lmp(info["lmps"], f) for f in NONDEVIATOR_FIDS]
+        )))
         trace["lmp_sys"].append(float(info["avg_lmp"]))
-        trace["gen_f0"].append(firm_total_mw(actions, NONDEVIATOR_FID))
+        # gen_f0 = COMBINED output of all non-deviating firms
+        trace["gen_f0"].append(float(sum(
+            firm_total_mw(actions, f) for f in NONDEVIATOR_FIDS
+        )))
         trace["gen_f1"].append(firm_total_mw(actions, DEVIATOR_FID))
 
     # t = -2, -1

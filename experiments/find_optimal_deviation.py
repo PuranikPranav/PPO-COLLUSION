@@ -24,13 +24,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iso_market.market_env import ElectricityMarketEnv, FIRM_PLANT_IDX, PLANTS
+from iso_market.market_env import ElectricityMarketEnv, FIRM_PLANT_IDX, PLANTS, NUM_FIRMS
 from experiments.impulse_response import _static_best_response_mw, profit_firm
 from experiments.paths import DEFAULT_RUN_DIR_NAME, resolve_run_dir
 from experiments.stochastic_deviation import load_session_agents, load_or_warm_normalizers
 
 DEVIATOR_FID = 1
-NONDEVIATOR_FID = 0
 
 
 def warmup_to_resting_state(env, agents, normalizers, warmup: int, seed: int = 42):
@@ -89,15 +88,15 @@ def find_optimal_deviation(
 ) -> dict:
     """
     Search multiplier m so Firm `deviating_fid` maximizes one-period profit at t=0
-    while the rival plays greedy policy output.
+    while all rival firms play their greedy policy output.
 
     Returns dict with best_multiplier, baseline_profit, best_profit, etc.
     """
-    if deviating_fid not in (0, 1):
-        raise ValueError("deviating_fid must be 0 or 1")
+    if deviating_fid not in range(NUM_FIRMS):
+        raise ValueError(f"deviating_fid must be in 0..{NUM_FIRMS - 1}")
 
     _, policy_actions = warmup_to_resting_state(env, agents, normalizers, warmup, seed)
-    rival_fid = 1 - deviating_fid
+    rival_fids = [f for f in range(NUM_FIRMS) if f != deviating_fid]
 
     test_multipliers = np.linspace(mult_min, mult_max, n_grid)
     best_profit = -float("inf")
@@ -108,7 +107,8 @@ def find_optimal_deviation(
 
     if verbose:
         print(f"Searching static best response (uniform multiplier) for Firm {deviating_fid}...")
-        print(f"  Rival Firm {rival_fid} fixed at greedy MW = {np.sum(policy_actions[rival_fid]):.1f}")
+        rivals_mw = sum(float(np.sum(policy_actions[f])) for f in rival_fids)
+        print(f"  Rival firms {rival_fids} fixed at combined greedy MW = {rivals_mw:.1f}")
 
     for mult in test_multipliers:
         trial_actions = scale_deviator_actions(policy_actions, deviating_fid, float(mult))
@@ -124,11 +124,10 @@ def find_optimal_deviation(
 
     # Full per-plant static BR (reference)
     if deviating_fid == DEVIATOR_FID:
-        br_mw_arr = _static_best_response_mw(policy_actions[NONDEVIATOR_FID], env)
-        br_actions = {
-            NONDEVIATOR_FID: policy_actions[NONDEVIATOR_FID],
-            DEVIATOR_FID: br_mw_arr,
-        }
+        rival_mw = {f: policy_actions[f] for f in rival_fids}
+        br_mw_arr = _static_best_response_mw(rival_mw, env)
+        br_actions = dict(rival_mw)
+        br_actions[DEVIATOR_FID] = br_mw_arr
         br_profit = one_period_profit(env, br_actions, deviating_fid)
         br_mw = float(np.sum(br_mw_arr))
     else:
@@ -187,7 +186,8 @@ def main():
         default=None,
         help="Single session id (default: summarize all sessions)",
     )
-    parser.add_argument("--deviating-fid", type=int, default=DEVIATOR_FID, choices=(0, 1))
+    parser.add_argument("--deviating-fid", type=int, default=DEVIATOR_FID,
+                        choices=tuple(range(NUM_FIRMS)))
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--mult-min", type=float, default=0.50)
     parser.add_argument("--mult-max", type=float, default=2.00)

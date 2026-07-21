@@ -7,7 +7,7 @@ import os
 # Add the parent directory (PPO-COLLUSION) to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iso_market.node_network import P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC, QC
+from iso_market.node_network import P0, Q0, get_ptdf_matrix, LINE_LIMITS, MC, QC, PLANT_SPECS
 
 class DCOPF:
     def __init__(self):
@@ -20,16 +20,16 @@ class DCOPF:
         Solves the DC-OPF to maximize social welfare given firm generation.
         
         Args:
-            gen_dict (dict): Dictionary with keys 'Firm1_Node1', 'Firm1_Node2', 'Firm2_Node2'
+            gen_dict (dict): Dictionary keyed by the plant cost-keys of the active
+                market (see node_network.PLANT_SPECS), e.g. 'Firm1_Node2', ...
         """
         # 1. Variables: ISO decides nodal demand (d) to maximize welfare
         d = cp.Variable(self.num_nodes)
-        
-        # 2. Fixed Generation Inputs from the firms
+
+        # 2. Fixed Generation Inputs from the firms (placed per PLANT_SPECS)
         g = np.zeros(self.num_nodes)
-        g[0] = gen_dict['Firm1_Node1']
-        g[1] = gen_dict['Firm1_Node2'] + gen_dict['Firm2_Node2']
-        # Nodes 2, 3, 4 (Indices 2, 3, 4) have no generators in this setup
+        for _f, node, key in PLANT_SPECS:
+            g[node] += gen_dict[key]
 
         # 3. Net Injection Vector (Injection = Generation - Demand)
         y = g - d
@@ -42,7 +42,7 @@ class DCOPF:
         # balance: Sum of all net injections must be zero (KCL)
         balance_constraint = cp.sum(y) == 0 
         
-        limits = np.array([40.0, 40.0, 40.0, 40.0, 30.0])
+        limits = LINE_LIMITS.astype(float)
         line_flows  = self.ptdf @ y
         flow_limit_con = line_flows <= limits
         flow_limit_min = line_flows >= -limits
@@ -64,9 +64,7 @@ class DCOPF:
         shadow_price_23 = lam_max - lam_min
         
         # Total System Production Cost
-        total_cost = (gen_dict['Firm1_Node1'] * MC['Firm1_Node1'] + 
-                      gen_dict['Firm1_Node2'] * MC['Firm1_Node2'] + 
-                      gen_dict['Firm2_Node2'] * MC['Firm2_Node2'])
+        total_cost = sum(gen_dict[key] * MC[key] for _f, _n, key in PLANT_SPECS)
 
         return {
             'lmps': lmps,

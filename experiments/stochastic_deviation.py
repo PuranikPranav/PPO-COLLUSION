@@ -253,13 +253,17 @@ def build_event_study(log: dict, *, window: int = 30) -> dict:
         if t - window < 0 or t + window >= T:
             continue
         dev = int(log["deviator"][t])
-        rival = 1 - dev
+        rivals = [f for f in range(NUM_FIRMS) if f != dev]
         sl = slice(t - window, t + window + 1)
         buckets[dev]["gen_self"].append(log["gen_firm"][dev][sl].copy())
-        buckets[dev]["gen_rival"].append(log["gen_firm"][rival][sl].copy())
+        buckets[dev]["gen_rival"].append(
+            np.sum([log["gen_firm"][r][sl] for r in rivals], axis=0)
+        )
         buckets[dev]["lmp"].append(log["avg_lmp"][sl].copy())
         buckets[dev]["profit_self"].append(log["profit_firm"][dev][sl].copy())
-        buckets[dev]["profit_rival"].append(log["profit_firm"][rival][sl].copy())
+        buckets[dev]["profit_rival"].append(
+            np.sum([log["profit_firm"][r][sl] for r in rivals], axis=0)
+        )
         buckets[dev]["x"].append(float(log["x_used"][t]))
 
     summarized = {}
@@ -384,7 +388,7 @@ def plot_event_study(summary: dict, *, out_path: Path, window: int,
 
     for col, fid in enumerate(deviators):
         s = summary[fid]
-        rival = 1 - fid
+        rival = (fid + 1) % NUM_FIRMS  # color slot only; series is combined rivals
         t = np.arange(-window, window + 1)
 
         # Generation
@@ -394,7 +398,7 @@ def plot_event_study(summary: dict, *, out_path: Path, window: int,
         ax.fill_between(t, s["gen_self_mean"] - s["gen_self_std"],
                         s["gen_self_mean"] + s["gen_self_std"], color=f"C{fid}", alpha=0.18)
         ax.plot(t, s["gen_rival_mean"], color=f"C{rival}", lw=1.5, ls="--",
-                label=f"Firm {rival} (rival)")
+                label="Rivals combined")
         ax.fill_between(t, s["gen_rival_mean"] - s["gen_rival_std"],
                         s["gen_rival_mean"] + s["gen_rival_std"], color=f"C{rival}", alpha=0.15)
         ax.axvline(0, color="red", ls="--", alpha=0.6, lw=1.0)
@@ -427,7 +431,7 @@ def plot_event_study(summary: dict, *, out_path: Path, window: int,
                         s["profit_self_mean"] + s["profit_self_std"],
                         color=f"C{fid}", alpha=0.18)
         ax.plot(t, s["profit_rival_mean"], color=f"C{rival}", lw=1.5, ls="--",
-                label=f"Firm {rival} profit (rival)")
+                label="Rivals combined profit")
         ax.fill_between(t, s["profit_rival_mean"] - s["profit_rival_std"],
                         s["profit_rival_mean"] + s["profit_rival_std"],
                         color=f"C{rival}", alpha=0.15)

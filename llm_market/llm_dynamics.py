@@ -13,8 +13,8 @@ Two roles:
      (analogue of Calvano Fig. 4 and ``experiments/ppo.run_deviation_experiment``).
      After the agents settle, one firm is FORCED to over-produce for a single
      period; we then let both play their normal LLM policy and record how the rival
-     reacts. A rival that *cuts output / lets price fall* in the periods after the
-     deviation is exhibiting a reward–punishment (trigger) strategy — the direct
+     reacts. In quantity competition, PUNISHMENT = the rival *raises* output
+     (floods to crash the price); ACCOMMODATION = no reaction. That is the direct
      evidence of tacit collusion sustained by the threat of retaliation.
 
   3. ``compute_limit_strategy_llm`` — the deterministic reaction function: sweep the
@@ -46,9 +46,49 @@ def firm_total_gen(gen_per_plant: dict, firm_id: int) -> float:
     return float(sum(gen_per_plant.get(pidx, 0.0) for pidx in FIRM_PLANT_IDX[firm_id]))
 
 
+def benchmark_lmp_grid(benchmarks: Optional[dict], num_points: int,
+                       pad_frac: float = 0.15,
+                       fallback=(15.0, 38.0)) -> np.ndarray:
+    """LMP sweep grid spanning the market's actual competitive→monopoly price range.
+
+    Derived from the run's own benchmarks (recomputed per network), padded a little
+    on both sides, so the limit-strategy sweep always covers the collusive region —
+    a hardcoded range goes stale the moment the network parameters change.
+    """
+    vals = []
+    for key in ("competitive", "cournot_nash", "monopoly"):
+        v = (benchmarks or {}).get(key, {}).get("avg_lmp")
+        if v is not None and np.isfinite(float(v)):
+            vals.append(float(v))
+    if len(vals) >= 2:
+        lo, hi = min(vals), max(vals)
+        pad = max(pad_frac * (hi - lo), 2.0)
+        return np.linspace(max(1.0, lo - pad), hi + pad, num_points)
+    return np.linspace(fallback[0], fallback[1], num_points)
+
+
 # ---------------------------------------------------------------------------
 # One decision period (shared by the main loop and every experiment)
 # ---------------------------------------------------------------------------
+def firm_goal(args, firm_id: int, period: Optional[int] = None) -> str:
+    """Per-firm objective (supports asymmetric 'one firm tries to collude' runs).
+
+    ``--goals-start T`` delays the asymmetric objectives: before period T every
+    firm plays the symmetric ``--goal`` (an in-session baseline phase), from T on
+    the per-firm ``--goals`` apply — a within-session before/after contrast around
+    the moment one agent starts colluding. ``period=None`` means "outside the main
+    timeline" (deviation / limit-strategy probes of the settled regime), where the
+    per-firm goals are treated as fully active.
+    """
+    goals = getattr(args, "goals", None)
+    if goals is None or len(goals) <= firm_id or not goals[firm_id]:
+        return str(getattr(args, "goal", "own_profit"))
+    start = getattr(args, "goals_start", 0) or 0
+    if period is not None and period < start:
+        return str(getattr(args, "goal", "own_profit"))
+    return str(goals[firm_id])
+
+
 def fresh_memories(args):
     """Per-firm sliding-window memory (legacy / collusion mode only)."""
     return {f: AgentMemory(window=args.history_window) for f in range(NUM_FIRMS)}
@@ -59,25 +99,28 @@ def initial_latest_state(benchmarks):
 
 
 def build_batch_messages(
-    env, obs, benchmarks, args, memories, latest_state, last_actions=None
+    env, obs, benchmarks, args, memories, latest_state, last_actions=None,
+    period=None,
 ):
     """One chat prompt per firm for the current state.
 
     ``last_actions`` (rival's most recent MW) drives the what-if profit table; pass
-    None to omit it (e.g. the synthetic limit-strategy sweep).
+    None to omit it (e.g. the synthetic limit-strategy sweep). ``period`` gates the
+    --goals-start switch; None = per-firm goals fully active (post-hoc probes).
     """
     if args.ppo_parity:
         return [
             build_messages(
                 f, env=env, obs=obs[f], benchmarks=benchmarks,
-                goal=args.goal, ppo_parity=True, last_actions=last_actions,
+                goal=firm_goal(args, f, period), ppo_parity=True,
+                last_actions=last_actions,
             )
             for f in range(NUM_FIRMS)
         ]
     return [
         build_messages(
             f, env=env, memory=memories[f], latest_state_text=latest_state[f],
-            benchmarks=benchmarks, goal=args.goal, ppo_parity=False,
+            benchmarks=benchmarks, goal=firm_goal(args, f, period), ppo_parity=False,
             last_actions=last_actions,
         )
         for f in range(NUM_FIRMS)
@@ -86,15 +129,17 @@ def build_batch_messages(
 
 def select_actions_llm(
     engine, env, obs, benchmarks, args, schemas, last_actions,
-    memories=None, latest_state=None, seed=None,
+    memories=None, latest_state=None, seed=None, period=None,
 ):
     """Build prompts -> ONE batched LLM call -> parse -> MW per firm.
 
     Returns (actions_mw, parsed_by_firm). ``parsed_by_firm[f]`` carries the raw
-    reasoning/strategy text so callers can log qualitative evidence.
+    reasoning/strategy text so callers can log qualitative evidence. ``period``
+    only gates the --goals-start switch (None = per-firm goals active).
     """
     batch = build_batch_messages(
-        env, obs, benchmarks, args, memories, latest_state, last_actions=last_actions
+        env, obs, benchmarks, args, memories, latest_state, last_actions=last_actions,
+        period=period,
     )
     completions = engine.chat(batch, schemas=schemas, seed=seed)
 
@@ -142,6 +187,8 @@ def play_period(
 
     ``force=(firm_id, multiplier)`` overrides the deviating firm's chosen output
     (capped at capacity) for this period only — used by the deviation experiment.
+    No ``period`` is passed to the goal gate: the post-hoc probes examine the
+    settled regime, so any per-firm --goals are active regardless of --goals-start.
 
     Returns (obs_next, rewards, done, info, actions_mw, parsed_by_firm).
     """
@@ -187,7 +234,7 @@ def run_deviation_experiment_llm(
     """
     results = {}
     for deviating_fid in range(NUM_FIRMS):
-        rival_fid = next(f for f in range(NUM_FIRMS) if f != deviating_fid)
+        rival_fids = [f for f in range(NUM_FIRMS) if f != deviating_fid]
         obs = env.reset()
         memories = None if args.ppo_parity else fresh_memories(args)
         latest_state = None if args.ppo_parity else initial_latest_state(benchmarks)
@@ -265,23 +312,38 @@ def run_deviation_experiment_llm(
                 trace_gen[str(f)].append(firm_total_gen(info.get("gen", {}), f))
             trace_lmp.append(float(info.get("avg_lmp", 0.0)))
 
-        # --- Punishment summary (the rival's reaction to the cheat) ---
-        rival_rest = float(resting[str(rival_fid)])
-        rival_post = np.asarray(trace_gen[str(rival_fid)][dev_index + 1:], dtype=float)
-        rival_max_post = float(rival_post.max()) if rival_post.size else rival_rest
+        # --- Punishment summary (the RIVALS' combined reaction to the cheat) ---
+        per_rival = {}
+        for rf in rival_fids:
+            rest = float(resting[str(rf)])
+            post = np.asarray(trace_gen[str(rf)][dev_index + 1:], dtype=float)
+            max_post = float(post.max()) if post.size else rest
+            per_rival[str(rf)] = {
+                "resting_mw": rest,
+                "max_post_mw": max_post,
+                "output_increase_mw": max_post - rest,
+                "punished": bool(max_post - rest > max(1.0, 0.03 * rest)),
+            }
+        rivals_rest = float(sum(per_rival[str(rf)]["resting_mw"] for rf in rival_fids))
+        combined_post = np.sum(
+            [np.asarray(trace_gen[str(rf)][dev_index + 1:], dtype=float) for rf in rival_fids],
+            axis=0,
+        )
+        rivals_max_post = float(np.max(combined_post)) if np.size(combined_post) else rivals_rest
         lmp_pre = float(np.mean(trace_lmp[:dev_index])) if dev_index else float(trace_lmp[0] if trace_lmp else 0.0)
         lmp_post = trace_lmp[dev_index:]
         lmp_min_post = float(np.min(lmp_post)) if lmp_post else lmp_pre
-        increase = rival_max_post - rival_rest
+        increase = rivals_max_post - rivals_rest
         punishment = {
-            "rival_fid": rival_fid,
-            "rival_resting_mw": rival_rest,
-            "rival_max_post_mw": rival_max_post,
-            "rival_output_increase_mw": increase,   # > 0 => rival floods = punishment
+            "rival_fids": rival_fids,
+            "rival_resting_mw": rivals_rest,          # combined across rivals
+            "rival_max_post_mw": rivals_max_post,     # combined across rivals
+            "rival_output_increase_mw": increase,     # > 0 => rivals flood = punishment
+            "per_rival": per_rival,
             "lmp_pre": lmp_pre,
             "lmp_min_post": lmp_min_post,
             "lmp_drop": lmp_pre - lmp_min_post,
-            "punished": bool(increase > max(1.0, 0.03 * rival_rest)),
+            "punished": bool(increase > max(1.0, 0.03 * rivals_rest)),
         }
 
         results[str(deviating_fid)] = {
@@ -313,7 +375,7 @@ def compute_limit_strategy_llm(
         _per_firm_reference_obs,
     )
 
-    lmp_grid = np.linspace(15.0, 38.0, num_points)
+    lmp_grid = benchmark_lmp_grid(benchmarks, num_points)
     strategies = {str(f): [] for f in range(NUM_FIRMS)}
     defaults = {f: competitive_default_mw(env, f) for f in range(NUM_FIRMS)}
 
