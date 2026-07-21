@@ -11,6 +11,10 @@ vector is a Parameter, so the problem structure is compiled once and re-solved
 efficiently at each step with warm-starting.
 """
 
+from __future__ import annotations
+
+from typing import Optional
+
 import numpy as np
 import cvxpy as cp  # for DC-OPF convex maximization
 
@@ -63,7 +67,7 @@ class ElectricityMarketEnv:
         include_prev_reward: bool = True,
         obs_mode: str = "full",
         demand_shock: float = 0.0,
-        shock_seed: int | None = None,
+        shock_seed: Optional[int] = None,
         shock_persistence: float = 0.5,
     ):
         self.history_len = history_len

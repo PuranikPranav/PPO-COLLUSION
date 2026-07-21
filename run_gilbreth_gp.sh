@@ -1,13 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=ppo-gp-collusion
-#SBATCH --output=slurm-gp-%j.out
-#SBATCH --time=24:00:00
+#SBATCH --account=liu334
+#SBATCH --partition=a100-40gb
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-# NOTE: the bottleneck is the CVXPY market clear (CPU); GPU is optional and
-# usually queues longer. Uncomment if you want it:
-##SBATCH --gres=gpu:1
+# Gilbreth rejects jobs with "No GPUs requested" unless GRES is set
+# (CPU-only partitions are not the default here).
+#SBATCH --gres=gpu:1
+#SBATCH --time=2-00:00:00
+#SBATCH --mem=50G
+#SBATCH --output=slurm-gp-%j.out
+#SBATCH --error=slurm-gp-%j.err
 #
 # GREEN-PORTER / IMPERFECT-MONITORING run (Calvano et al. 2021 adaptation):
 # two-firm market, unobserved i.i.d. demand shocks, price(+own-output) state.

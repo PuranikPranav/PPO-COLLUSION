@@ -32,6 +32,8 @@ actions, δ=0.95, α=0.15, β=4e-6, 1000 sessions, convergence = greedy policy u
 ``convergence`` is measured in *PPO update* units (--convergence-patience), not env steps.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -40,6 +42,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -874,7 +877,7 @@ def evaluate_deterministic(agents, obs_normalizers, env, ref_public):
 
 
 def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=50,
-                           own_anchor: dict | None = None):
+                           own_anchor: Optional[dict] = None):
     """Evaluate the converged deterministic policy across a range of LMP levels.
 
     ONE curve PER FIRM (the firms are asymmetric — their reaction functions are
