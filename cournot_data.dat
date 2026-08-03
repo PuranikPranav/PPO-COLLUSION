@@ -1,0 +1,56 @@
+# Data for nash_cournot.mod (PATH) and monopoly.mod (Knitro).
+# Must match iso_market/node_network.py.
+# Firm 1 = large firm (nodes 1,2); Firm 2 = small firm (node 2).
+# Node 5 is the PTDF reference (hub).
+
+param N := 5;
+param L := 5;
+
+set G :=
+(1,1) (1,2) (2,2);
+
+param CAP :=
+[*,*]  1 1   150
+       1 2    50
+       2 2   100;
+
+param MC :=
+[*,*]  1 1   18
+       1 2   18
+       2 2   22;
+
+param QC :=
+[*,*]  1 1   0.04
+       1 2   0.04
+       2 2   0.02;
+
+param P0 :=
+1  55
+2  50
+3  75
+4  70
+5  70;
+
+param Q0 :=
+1  250
+2  200
+3  25
+4  20
+5  15;
+
+# Line limits (MW): 1:(1-2), 2:(2-3), 3:(3-1), 4:(3-4), 5:(4-5)
+param T :=
+1  40
+2  15
+3  25
+4  20
+5  10;
+
+# PTDF columns are spokes 1..N-1 only (reference node N excluded).
+param PTDF :
+       1       2       3       4    :=
+1   0.3333 -0.3333  0       0
+2   0.3333  0.6667  0       0
+3  -0.6667 -0.3333  0       0
+4   1       1       1       0
+5   1       1       1       1;

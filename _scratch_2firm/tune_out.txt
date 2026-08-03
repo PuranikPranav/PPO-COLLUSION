@@ -1,0 +1,50 @@
+=== A: Q0hub=550.0 MC=[15. 18.] QC=[0.05  0.035] ===
+[A] free-flow nash=[63.3 44.6 18.7 14.6  6.5] mono=[56.  40.1 15.9 13.6  6. ] gen n=308 m=267 gap0=+2.5%
+  [A it0] LIM=[ 60.  42. 500. 500. 500.] caps=[205. 200.] gap=+5.0% IR=(1.11,0.98) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [A it1] LIM=[ 58.  41. 500. 500. 500.] caps=[200. 195.] gap=+6.1% IR=(1.12,0.99) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [A it2] LIM=[ 57.  42. 500. 500. 500.] caps=[200. 195.] gap=+6.5% IR=(1.13,1.00) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [A it3] LIM=[ 58.  41. 500. 500. 500.] caps=[200. 195.] gap=+6.1% IR=(1.12,0.99) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [A it4] LIM=[ 57.  42. 500. 500. 500.] caps=[200. 195.] gap=+6.5% IR=(1.13,1.00) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [A it5] LIM=[ 58.  41. 500. 500. 500.] caps=[200. 195.] gap=+6.1% IR=(1.12,0.99) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+=== B: Q0hub=550.0 MC=[15. 18.] QC=[0.035 0.025] ===
+[B] free-flow nash=[65.4 45.9 19.5 14.9  6.6] mono=[57.6 41.  16.5 13.8  6.1] gen n=321 m=276 gap0=+2.9%
+  [B it0] LIM=[ 61.  43. 500. 500. 500.] caps=[215. 200.] gap=+5.8% IR=(1.20,0.89) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [B it1] LIM=[ 59.  42. 500. 500. 500.] caps=[210. 200.] gap=+7.1% IR=(1.21,0.90) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [B it2] LIM=[ 58.  43. 500. 500. 500.] caps=[210. 200.] gap=+7.6% IR=(1.22,0.91) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [B it3] LIM=[ 60.  41. 500. 500. 500.] caps=[210. 195.] gap=+7.6% IR=(1.22,0.91) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [B it4] LIM=[ 58.  43. 500. 500. 500.] caps=[210. 195.] gap=+7.6% IR=(1.22,0.91) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [B it5] LIM=[ 60.  41. 500. 500. 500.] caps=[210. 195.] gap=+7.6% IR=(1.22,0.91) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+=== C: Q0hub=550.0 MC=[14. 17.] QC=[0.025 0.018] ===
+[C] free-flow nash=[68.1 47.6 20.5 15.3  6.8] mono=[59.6 42.3 17.3 14.1  6.3] gen n=336 m=288 gap0=+3.3%
+  [C it0] LIM=[ 64.  45.  19. 500. 500.] caps=[225. 210.] gap=+5.9% IR=(1.31,0.76) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [C it1] LIM=[ 62.  44.  18. 500. 500.] caps=[225. 205.] gap=+7.1% IR=(1.32,0.77) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [C it2] LIM=[ 61.  43.  19. 500. 500.] caps=[225. 205.] gap=+7.9% IR=(1.33,0.78) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [C it3] LIM=[ 60.  44.  18. 500. 500.] caps=[220. 205.] gap=+8.3% IR=(1.33,0.78) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [C it4] LIM=[ 62.  43.  19. 500. 500.] caps=[220. 205.] gap=+7.5% IR=(1.33,0.77) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [C it5] LIM=[ 61.  44.  18. 500. 500.] caps=[225. 205.] gap=+7.7% IR=(1.33,0.77) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+=== D: Q0hub=750.0 MC=[15. 18.] QC=[0.03  0.022] ===
+[D] free-flow nash=[67.  46.9 20.1 15.1  6.7] mono=[57.8 41.2 16.6 13.8  6.1] gen n=408 m=342 gap0=+4.0%
+  [D it0] LIM=[ 62.  44.  18. 500. 500.] caps=[275. 255.] gap=+6.5% IR=(1.20,0.91) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [D it1] LIM=[ 60.  43.  17. 500. 500.] caps=[270. 255.] gap=+7.5% IR=(1.21,0.92) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [D it2] LIM=[ 59.  42.  19. 500. 500.] caps=[270. 255.] gap=+8.1% IR=(1.21,0.93) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [D it3] LIM=[ 58.  43.  17. 500. 500.] caps=[270. 250.] gap=+8.5% IR=(1.22,0.93) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [D it4] LIM=[ 60.  42.  19. 500. 500.] caps=[270. 250.] gap=+7.8% IR=(1.21,0.92) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [D it5] LIM=[ 59.  43.  17. 500. 500.] caps=[270. 250.] gap=+8.0% IR=(1.21,0.93) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+=== E: Q0hub=550.0 MC=[16. 18.] QC=[0.015 0.012] ===
+[E] free-flow nash=[68.  47.5 20.4 15.3  6.8] mono=[59.4 42.2 17.2 14.   6.2] gen n=335 m=286 gap0=+3.5%
+  [E it0] LIM=[ 64.  45.  19. 500. 500.] caps=[225. 210.] gap=+6.1% IR=(1.40,0.66) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [E it1] LIM=[ 62.  44.  18. 500. 500.] caps=[220. 210.] gap=+7.3% IR=(1.42,0.67) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [E it2] LIM=[ 61.  43.  19. 500. 500.] caps=[220. 205.] gap=+8.2% IR=(1.43,0.67) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [E it3] LIM=[ 60.  44.  18. 500. 500.] caps=[220. 205.] gap=+8.6% IR=(1.44,0.68) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [E it4] LIM=[ 61.  43.  19. 500. 500.] caps=[220. 205.] gap=+8.2% IR=(1.43,0.67) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [E it5] LIM=[ 60.  44.  18. 500. 500.] caps=[220. 205.] gap=+8.6% IR=(1.44,0.68) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+=== F: Q0hub=650.0 MC=[15. 17.] QC=[0.01  0.008] ===
+[F] free-flow nash=[71.1 49.5 21.6 15.7  7. ] mono=[61.1 43.3 17.9 14.3  6.4] gen n=395 m=331 gap0=+4.6%
+  [F it0] LIM=[ 66.  46.  20. 500. 500.] caps=[265. 245.] gap=+7.6% IR=(1.57,0.50) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [F it1] LIM=[ 64.  45.  19. 500. 500.] caps=[265. 245.] gap=+8.7% IR=(1.58,0.50) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [F it2] LIM=[ 63.  44.  18. 500. 500.] caps=[260. 240.] gap=+9.8% IR=(1.60,0.51) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [F it3] LIM=[ 62.  45.  20. 500. 500.] caps=[260. 240.] gap=+9.6% IR=(1.60,0.51) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [F it4] LIM=[ 63.  44.  18. 500. 500.] caps=[260. 240.] gap=+9.8% IR=(1.60,0.51) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [F it5] LIM=[ 62.  45.  20. 500. 500.] caps=[260. 240.] gap=+9.6% IR=(1.60,0.51) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+
+===== 0 passing =====

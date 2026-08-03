@@ -1,0 +1,1145 @@
+\documentclass[lettersize,journal]{IEEEtran}
+\usepackage{amsmath,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{cite}
+\hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
+% updated with editorial comments 8/9/2021
+
+\begin{document}
+
+\title{Algorithmic Collusion in Networked Electricity Markets}
+
+\author{IEEE Publication Technology,~\IEEEmembership{Staff,~IEEE,}
+        % <-this % stops a space
+\thanks{This paper was produced by the IEEE Publication Technology Group. They are in Piscataway, NJ.}% <-this % stops a space
+\thanks{Manuscript received April 19, 2021; revised August 16, 2021.}}
+
+% The paper headers
+\markboth{Journal of \LaTeX\ Class Files,~Vol.~14, No.~8, August~2021}%
+{Shell \MakeLowercase{\textit{et al.}}: A Sample Article Using IEEEtran.cls for IEEE Journals}
+
+\IEEEpubid{0000--0000/00\$00.00~\copyright~2021 IEEE}
+% Remember, if you use this you must call \IEEEpubidadjcol in the second
+% column for its text to clear the IEEEpubid mark.
+
+\maketitle
+
+\begin{abstract}
+Deregulated electricity markets may face new risks when generation firms use autonomous learning-based algorithms. Existing studies of algorithmic collusion largely rely on Q-learning agents in simplified, discrete-action market settings. However, wholesale electricity markets involve continuous-action decisions and shared transmission networks, where firms interact not only through prices and quantities but also through congestion patterns. Prior work has shown that transmission constraints can facilitate collusion by allowing strategic suppliers to decongest constrained lines and shift congestion surplus from transmission owners to generation firms. This raises an important question: can autonomous learning agents discover and sustain similar behavior in a continuous-action, network-constrained electricity market? This study investigates tacit algorithmic collusion using independent Proximal Policy Optimization (PPO) agents embedded in a market framework with DC optimal power flow (DC-OPF). We simulate a five-node transmission network with strategic generation firms that independently learn policies that maximize cumulative profit, without communication or information sharing. Using an actor-critic architecture, we track policy convergence through normalized profit gains and evaluate whether the learned strategies produce persistent prices above competitive benchmarks. Preliminary results suggest that agents can converge to stable market outcomes consistent with tacit collusion, with strategies shaped by transmission capacity limits and network topology. Deviation experiments show that unilateral deviations do not necessarily trigger price wars; instead, agents exhibit accommodation and rapid mean reversion. We further analyze how congestion, observation history length, and market concentration affect the level and stability of learned market behavior.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Article submission, IEEE, IEEEtran, journal, \LaTeX, paper, template, typesetting.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\IEEEPARstart{A}{s} algorithmic trading replaces human decision-making in traditional markets such as power markets, it has become more important than ever to verify that these agents are not learning to manipulate the market prices. Since these agents interact repeatedly in a similar environment, they can eventually learn sophisticated strategies by colluding tacitly and sustain prices that are higher than the competitive price. Furthermore, certain features of electricity markets, such as the barrier to entry for new firms and the dominance of incumbent power generators, exacerbate market dynamics. A higher price means that the extra profits of firms come at the expense of consumers. Moreover, this implicit collusion among the generators can be a headache for the Department of Justice, as it is very difficult to prove.
+
+Previous work demonstrates the collusive behavior of generators using a static economic model. However, these models cannot simulate the learning dynamics of complex AI pricing agents and also do not explain the process by which these collusive equilibria are sustained. Recent studies using multi-agent reinforcement learning in this domain have been limited to Q-learning algorithms. Even though Q-learning agents do demonstrate and explain the process by which these agents tacitly collude, there is still a significant limitation due to the discretization of state and action spaces, which is hardly the case in electricity markets. There remains a critical gap in understanding how sophisticated agents based on complex deep reinforcement learning algorithms behave in these highly critical, fast-paced, and highly sensitive electricity markets.
+
+\section{Research Methodology}
+
+\subsection{Perfect Competition Benchmark}
+
+In the perfect competition benchmark, we assume that all market participants act as price takers. By the First Fundamental Theorem of Welfare Economics, the competitive market equilibrium coincides with the solution of a central planner maximizing the total social welfare. Social welfare is defined as the gross consumer surplus minus the total cost of generation. Crucially, this competitive model serves as the theoretical floor benchmark for evaluating the severity and impact of the subsequent collusion simulations.
+
+The objective is to maximize social welfare subject to the physical constraints of the direct current (DC) transmission network, including the global energy balance and the thermal limits of the transmission lines. Let $\mathcal{N}$ denote the set of nodes, $\mathcal{G}$ the set of generators, and $\mathcal{L}$ the set of transmission lines. The decision variables are the demand $d_i$ at each node $i \in \mathcal{N}$ and the generation $g_{f,i}$ for each firm $f$ at node $i$.
+
+The centralized optimization problem is formulated as follows:
+\begin{equation}
+\begin{split}
+    \max_{d, g} \quad & \sum_{i \in \mathcal{N}} \left( P0_i d_i - \frac{1}{2} \frac{P0_i}{Q0_i} d_i^2 \right) \\
+    & - \sum_{(f,i) \in \mathcal{G}} \left( MC_{f,i} g_{f,i} + \frac{1}{2} QC_{f,i} g_{f,i}^2 \right)
+\end{split}
+\end{equation}
+
+subject to:
+\begin{align}
+    & \sum_{i \in \mathcal{N}} \left( \sum_f g_{f,i} - d_i \right) = 0 \quad : \lambda \\
+    & \sum_{i \in \mathcal{N}} PTDF_{k,i} \left( \sum_f g_{f,i} - d_i \right) \leq T_k \quad : \mu_k^+, \; \forall k \in \mathcal{L} \\
+    & -\sum_{i \in \mathcal{N}} PTDF_{k,i} \left( \sum_f g_{f,i} - d_i \right) \leq T_k \quad : \mu_k^-, \; \forall k \in \mathcal{L} \\
+    & g_{f,i} \leq CAP_{f,i} \quad : \rho_{f,i}, \quad \forall (f,i) \in \mathcal{G} \\
+    & d_i \geq 0, \quad g_{f,i} \geq 0
+\end{align}
+
+Where:
+\begin{itemize}
+    \item $P0_i$ and $Q0_i$ are the price and quantity intercepts of the inverse demand function at node $i$.
+    \item $MC_{f,i}$ and $QC_{f,i}$ are the linear and quadratic marginal cost coefficients for generator $f$ at node $i$.
+    \item $PTDF_{k,i}$ is the Power Transfer Distribution Factor mapping the net injection at node $i$ to the active power flow on line $k$.
+    \item $T_k$ is the thermal capacity limit of transmission line $k$.
+    \item $\lambda, \mu_k^+, \mu_k^-, \rho_{f,i}$ are the dual variables (Lagrange multipliers) associated with each respective constraint.
+\end{itemize}
+
+\subsubsection{Karush-Kuhn-Tucker (KKT) Conditions}
+
+Because the objective function is a strictly concave quadratic function and the equality and inequality constraints are linear, the feasible region is convex. Therefore, the KKT conditions are both necessary and sufficient for global optimality. The Lagrangian is constructed by appending the constraints to the objective function, and the conditions are derived by taking the partial derivatives with respect to the decision variables.
+
+The first-order stationarity conditions with respect to demand $d_i$ and generation $g_{f,i}$, represented in complementarity form, are:
+\begin{align}
+    0 \leq d_i \perp & -P0_i + \frac{P0_i}{Q0_i} d_i + \lambda \notag \\
+    & - \sum_{k \in \mathcal{L}} PTDF_{k,i} (\mu_k^+ - \mu_k^-) \geq 0 \\
+    0 \leq g_{f,i} \perp & MC_{f,i} + QC_{f,i} g_{f,i} - \lambda \notag \\
+    & + \sum_{k \in \mathcal{L}} PTDF_{k,i} (\mu_k^+ - \mu_k^-) + \rho_{f,i} \geq 0
+\end{align}
+
+The primal and dual feasibility, along with the complementary slackness conditions for the network and capacity constraints, are:
+\begin{align}
+    & \sum_{i \in \mathcal{N}} \left( \sum_f g_{f,i} - d_i \right) = 0 \\
+    & 0 \leq \mu_k^+ \perp T_k - \sum_{i \in \mathcal{N}} PTDF_{k,i} \left( \sum_f g_{f,i} - d_i \right) \geq 0, \notag \\
+    & \qquad \forall k \in \mathcal{L} \\
+    & 0 \leq \mu_k^- \perp T_k + \sum_{i \in \mathcal{N}} PTDF_{k,i} \left( \sum_f g_{f,i} - d_i \right) \geq 0, \notag \\
+    & \qquad \forall k \in \mathcal{L} \\
+    & 0 \leq \rho_{f,i} \perp CAP_{f,i} - g_{f,i} \geq 0, \quad \forall (f,i) \in \mathcal{G}
+\end{align}
+
+From the stationarity condition regarding $d_i$, we can extract the Locational Marginal Price (LMP) at node $i$, which represents the marginal benefit of electricity. If demand is strictly positive ($d_i > 0$), the LMP is defined exactly by the system's global energy balance dual minus the congestion components: $LMP_i = \lambda - \sum_{k \in \mathcal{L}} PTDF_{k,i} (\mu_k^+ - \mu_k^-)$. In this competitive setting, the stationarity condition for generation mathematically guarantees that each firm produces up to the exact point where their marginal cost of generation equates to the LMP at their respective node.
+
+% ====================================================================
+% SUBSECTION B — JOINT MONOPOLY (wheeling-fee MPEC)
+% ====================================================================
+\subsection{Joint Monopoly Benchmark}
+
+The joint monopoly benchmark represents the theoretical ceiling for
+collusive behavior, in which all generating firms act as a single,
+perfectly coordinated cartel. Consistent with a deregulated design, the
+transmission network is run by an exogenous independent system operator
+(ISO) whose sole role is to price and allocate scarce transmission through
+a \emph{wheeling auction}. The cartel therefore does not maximize consumer
+surplus; it maximizes the aggregate generation profit it collects at the
+nodal clearing prices while anticipating the ISO's congestion response.
+The price received by a generator at node $i$ is
+decomposed into a uniform hub (energy) price $p^h$ and a locational
+wheeling fee $w_i$, i.e.\ $LMP_i = p^h + w_i$, with the reference hub node
+$N$ normalized to $w_N = 0$. Relative to the welfare objective, the
+marginal-revenue ``factor of two'' is removed: the price enters the
+market-clearing link at its true slope $\tfrac{P0_i}{Q0_i}$, and market
+power is exercised through the joint choice of generation and dispatch
+rather than a doubled demand slope.
+
+\subsubsection{Bilevel (Embedded) Form}
+
+Let $G_i = \sum_{f:(f,i)\in\mathcal{G}} g_{f,i}$ be total generation at node
+$i$ and let $y_i$ be the net injection scheduled by the ISO into node $i$,
+so that nodal consumption is the induced quantity $G_i + y_i$ (no
+standalone demand variable enters the firms' problem). The ISO operates the
+lower-level wheeling auction
+\begin{equation}
+\begin{split}
+\max_{y} \quad & \sum_{i \in \mathcal{N}} w_i\, y_i \\
+\text{s.t.}\quad & \sum_{i \in \mathcal{N}} y_i = 0 \quad : \sigma \\
+& -T_k \le \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \le T_k
+   \;\; : \mu_k^{+},\mu_k^{-}, \;\; \forall k \in \mathcal{L},
+\end{split}
+\end{equation}
+and the cartel acts as a Stackelberg leader over this auction:
+\begin{equation}
+\begin{split}
+\max_{g, y, p^h, w} \quad & \sum_{i \in \mathcal{N}} (p^h + w_i)\, G_i \\
+& - \sum_{(f,i) \in \mathcal{G}}
+  \left( MC_{f,i} g_{f,i} + \tfrac{1}{2} QC_{f,i} g_{f,i}^2 \right)
+\end{split}
+\end{equation}
+subject to
+\begin{align}
+& 0 \le g_{f,i} \le CAP_{f,i}, \quad \forall (f,i) \in \mathcal{G} \\
+& P0_i - \frac{P0_i}{Q0_i}\left( G_i + y_i \right) = p^h + w_i,
+   \quad \forall i \in \mathcal{N} \\
+& w_N = 0 \\
+& y \text{ solves the lower-level ISO wheeling auction above.}
+\end{align}
+
+\subsubsection{Single-Level MPCC Form}
+
+The ISO auction is a linear program in $y$, so its KKT conditions are
+necessary and sufficient and may replace it as constraints, producing a
+Mathematical Program with Complementarity Constraints (MPCC). With $\sigma$
+the energy-balance dual and $\mu_k^{+}, \mu_k^{-}$ the thermal duals, the
+ISO optimality conditions are
+\begin{align}
+& w_i - \sigma - \sum_{k \in \mathcal{L}} PTDF_{k,i}(\mu_k^{+} - \mu_k^{-})
+   = 0, \quad \forall i \in \mathcal{N} \\
+& \sum_{i \in \mathcal{N}} y_i = 0 \\
+& 0 \le \mu_k^{+} \perp T_k - \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L} \\
+& 0 \le \mu_k^{-} \perp T_k + \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L}.
+\end{align}
+The cartel's MPCC maximizes the aggregate-profit objective above subject to
+the capacity bounds, the market-clearing link, $w_N = 0$, and these ISO
+complementarity conditions.
+
+\subsubsection{Reduced KKT Form for the Solver}
+
+Selecting node $N$ as the PTDF reference ($PTDF_{k,N} = 0$) and imposing
+$w_N = 0$ forces the balance dual $\sigma = 0$ and lets us eliminate
+$y_N = -\sum_{i \in \mathcal{S}} y_i$, where
+$\mathcal{S} = \mathcal{N} \setminus \{N\}$. The KNITRO-ready single-level
+program is
+\begin{equation}
+\begin{split}
+\max_{g,\,y,\,p^h,\,w,\,\mu^{+},\,\mu^{-}} \;&
+ \sum_{i \in \mathcal{N}} (p^h + w_i)\, G_i \\
+& - \sum_{(f,i) \in \mathcal{G}}
+   \big( MC_{f,i} g_{f,i} + \tfrac{1}{2} QC_{f,i} g_{f,i}^2 \big)
+\end{split}
+\end{equation}
+subject to
+\begin{align}
+& 0 \le g_{f,i} \le CAP_{f,i}, \quad \forall (f,i) \in \mathcal{G} \\
+& P0_i - \frac{P0_i}{Q0_i}\left( G_i + y_i \right) = p^h + w_i,
+   \quad \forall i \in \mathcal{N} \\
+& w_i - \sum_{k \in \mathcal{L}} PTDF_{k,i}(\mu_k^{+} - \mu_k^{-}) = 0,
+   \quad \forall i \in \mathcal{S} \\
+& w_N = 0 \\
+& 0 \le \mu_k^{+} \perp T_k - \sum_{i \in \mathcal{S}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L} \\
+& 0 \le \mu_k^{-} \perp T_k + \sum_{i \in \mathcal{S}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L},
+\end{align}
+where $y_N = -\sum_{i \in \mathcal{S}} y_i$ is substituted into the node-$N$
+market-clearing equation.
+
+% ====================================================================
+% SUBSECTION C — NASH–COURNOT (wheeling-fee LCP)
+% ====================================================================
+\subsection{Nash--Cournot Equilibrium Benchmark}
+
+The Nash--Cournot equilibrium establishes the individually rational,
+non-cooperative baseline. Each firm maximizes its own profit, valuing its
+output at the nodal clearing price $p^h + w_i$ and recognizing (the Cournot
+conjecture) that its injection moves that price through the local
+inverse-demand slope $\tfrac{P0_i}{Q0_i}$. The ISO is exogenous and runs the
+same wheeling auction as in the monopoly case. Because the firms and the
+ISO pursue distinct objectives, the equilibrium is the simultaneous
+solution of all firms' first-order conditions stacked with the ISO's
+optimality conditions, a square (linear) complementarity problem solved
+with PATH. Crucially, the standalone demand variable $d_i$ is removed from
+the firm problem; the firm sees only the received price $p^h + w_i$, which
+couples its output decision to the line duals $\mu_k^{\pm}$ through the ISO.
+
+\subsubsection{Embedded Form}
+
+The ISO solves the lower-level wheeling auction (identical to the monopoly
+case):
+\begin{equation}
+\begin{split}
+\max_{y} \quad & \sum_{i \in \mathcal{N}} w_i\, y_i \\
+\text{s.t.}\quad & \sum_{i \in \mathcal{N}} y_i = 0 \quad : \sigma \\
+& -T_k \le \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \le T_k
+   \;\; : \mu_k^{+},\mu_k^{-}, \;\; \forall k \in \mathcal{L}.
+\end{split}
+\end{equation}
+Each firm $f$, taking rivals' output
+$G_{-f,i} = \sum_{m \ne f} g_{m,i}$ and the prices as given, solves
+\begin{equation}
+\begin{split}
+\max_{g_f} \;& \sum_{i \in \mathcal{N}}
+ \Big[ \Big(P0_i - \tfrac{P0_i}{Q0_i}\big( g_{f,i} + G_{-f,i} + y_i \big)\Big) g_{f,i} \\
+& \qquad - \Big( MC_{f,i} g_{f,i} + \tfrac{1}{2} QC_{f,i} g_{f,i}^2 \Big) \Big] \\
+\text{s.t.}\;& 0 \le g_{f,i} \le CAP_{f,i} \quad : \rho_{f,i},
+\end{split}
+\end{equation}
+
+\subsubsection{Stacked KKT Form}
+
+\begin{align}
+0 \le g_{f,i} \perp\;& -(P0_i - \tfrac{P0_i}{Q0_i}\big( g_{f,i} + G_{-f,i} + y_i \big)) + \frac{P0_i}{Q0_i} g_{f,i} \notag \\
+& + MC_{f,i} + QC_{f,i} g_{f,i} + \rho_{f,i} \ge 0 \\
+0 \le \rho_{f,i} \perp\;& CAP_{f,i} - g_{f,i} \ge 0,
+   \quad \forall (f,i) \in \mathcal{G}.
+\end{align}
+The market-clearing identity and the ISO optimality conditions complete the
+system:
+\begin{align}
+& P0_i - \frac{P0_i}{Q0_i}\Big( \sum_{f} g_{f,i} + y_i \Big) \notag \\
+& \quad {} - \Big(P0_i - \tfrac{P0_i}{Q0_i}\big( g_{f,i} + G_{-f,i} + y_i \big)\Big)
+   = 0, \quad \forall i \in \mathcal{N} \\
+& w_i - \sigma - \sum_{k \in \mathcal{L}} PTDF_{k,i}(\mu_k^{+} - \mu_k^{-})
+   = 0, \quad \forall i \in \mathcal{N} \\
+& \sum_{i \in \mathcal{N}} y_i = 0 \\
+& 0 \le \mu_k^{+} \perp T_k - \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L} \\
+& 0 \le \mu_k^{-} \perp T_k + \sum_{i \in \mathcal{N}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L}.
+\end{align}
+
+\subsubsection{Reduced LCP Form for the Solver}
+
+Imposing the reference normalization ($PTDF_{k,N} = 0$,
+$w_N = 0 \Rightarrow \sigma = 0$) and eliminating
+$y_N = -\sum_{i \in \mathcal{S}} y_i$ yields the square complementarity
+problem solved by PATH:
+\begin{align}
+0 \le g_{f,i} \perp\;& -\Big(P0_i - \tfrac{P0_i}{Q0_i}\big( g_{f,i} + G_{-f,i} + y_i \big)\Big) + \frac{P0_i}{Q0_i} g_{f,i} \notag \\
+& + MC_{f,i} + QC_{f,i} g_{f,i} + \rho_{f,i} \ge 0,
+   \quad \forall (f,i) \in \mathcal{G} \\
+0 \le \rho_{f,i} \perp\;& CAP_{f,i} - g_{f,i} \ge 0,
+   \quad \forall (f,i) \in \mathcal{G}.
+\end{align}
+
+\begin{align}
+& P0_i - \frac{P0_i}{Q0_i}\Big( \sum_{f} g_{f,i} + y_i \Big) \notag \\
+& \quad {} - \Big(P0_i - \tfrac{P0_i}{Q0_i}\big( g_{f,i} + G_{-f,i} + y_i \big)\Big)
+   = 0, \quad \forall i \in \mathcal{N} \\
+& w_i - \sum_{k \in \mathcal{L}} PTDF_{k,i}(\mu_k^{+} - \mu_k^{-}) = 0,
+   \quad \forall i \in \mathcal{S} \\
+& w_N = 0 \\
+& 0 \le \mu_k^{+} \perp T_k - \sum_{i \in \mathcal{S}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L} \\
+& 0 \le \mu_k^{-} \perp T_k + \sum_{i \in \mathcal{S}} PTDF_{k,i}\, y_i \ge 0,
+   \quad \forall k \in \mathcal{L},
+\end{align}
+where $y_N = -\sum_{i \in \mathcal{S}} y_i$. The free equality conditions
+(market clearing and wheeling pricing) pair with the free variables
+$(p^h, y_i, w_i)$, so the system is square and is solved directly by PATH.
+
+\subsection{Numerical Benchmark Comparison}
+
+To establish a quantitative scale for the learning experiments, the perfect competition, Nash Cournot, and joint monopoly programs are solved on the five node test network using a convex programming and complementarity solver. Table \ref{tab:params} lists the network and cost parameters used in all experiments. The market has two strategic firms and three generating plants. Firm 0 owns a cheap base plant at node 0 and a small expensive peaking plant at node 1. Firm 1 owns a single mid cost plant at node 1. Nodes 2, 3, and 4 are pure load pockets with steep demand curves, so they depend on imports over the network.
+
+The parameters were tuned so that the three benchmarks are ordered cleanly along every dimension of interest. Total generation falls from competition to Nash to monopoly. Total profit and the average price rise in the same direction. The cartel solution leaves every transmission line strictly within its limit. Finally, the cartel earns more than the Nash outcome for each firm separately, not only in the aggregate. This last property matters for the learning study: if the cartel allocation makes one firm worse off than Nash, that firm has no reason to cooperate, and independent learners settle at the Nash outcome. With the parameters below, firm 0 gains 174 dollars per step and firm 1 gains 102 dollars per step by moving from Nash to the cartel, so tacit cooperation pays for both. Tables \ref{tab:headline} through \ref{tab:lmps} summarize the resulting equilibria along four dimensions: aggregate market outcomes, profit per firm, generation per plant, and nodal prices.
+
+\begin{table*}[!t]
+    \centering
+
+    % --- TABLE: NETWORK AND COST PARAMETERS ---
+    \caption{Network and Cost Parameters of the Five Node Test System}
+    \label{tab:params}
+    \begin{minipage}{0.36\textwidth}
+        \centering
+        \begin{tabular}{cccccc}
+        \hline
+        Plant & Firm & Node & Cap (MW) & $MC$ & $QC$ \\
+        \hline
+        0 & 0 & 0 & 150 & 18 & 0.030 \\
+        1 & 0 & 1 & 50  & 26 & 0.040 \\
+        2 & 1 & 1 & 100 & 20 & 0.025 \\
+        \hline
+        \end{tabular}
+    \end{minipage}\hfill
+    \begin{minipage}{0.28\textwidth}
+        \centering
+        \begin{tabular}{ccc}
+        \hline
+        Node & $P0_i$ (\$/MWh) & $Q0_i$ (MW) \\
+        \hline
+        0 & 55 & 250 \\
+        1 & 50 & 200 \\
+        2 & 75 & 25 \\
+        3 & 70 & 20 \\
+        4 & 70 & 15 \\
+        \hline
+        \end{tabular}
+    \end{minipage}\hfill
+    \begin{minipage}{0.3\textwidth}
+        \centering
+        \begin{tabular}{cccc}
+        \hline
+        Line & From & To & Limit $T_k$ (MW) \\
+        \hline
+        0 & 0 & 1 & 40 \\
+        1 & 1 & 2 & 15 \\
+        2 & 2 & 0 & 25 \\
+        3 & 2 & 3 & 20 \\
+        4 & 3 & 4 & 10 \\
+        \hline
+        \end{tabular}
+    \end{minipage}
+
+    \vspace{0.6cm}
+
+    % --- TABLE: HEADLINE METRICS ---
+    \caption{Headline Market Metrics Under the Three Benchmarks}
+    \label{tab:headline}
+    \begin{tabular}{lcccccc}
+    \hline
+    Metric & Competitive & Nash & Monopoly & \%$\Delta$ (C$\to$N) & \%$\Delta$ (N$\to$M) & \%$\Delta$ (C$\to$M) \\
+    \hline
+    Avg.\ LMP (\$/MWh) & 27.37 & 37.41 & 37.80 & $+36.7\%$ & $+1.0\%$ & $+38.1\%$ \\
+    Total generation (MW) & 254.91 & 163.07 & 155.53 & $-36.0\%$ & $-4.6\%$ & $-39.0\%$ \\
+    Total industry profit (\$/step) & 1602.96 & 2505.05 & 2780.60 & $+56.3\%$ & $+11.0\%$ & $+73.5\%$ \\
+    \hline
+    \end{tabular}
+
+    \vspace{0.6cm}
+
+    % --- TABLES: NARROW TABLES SIDE BY SIDE ---
+    \begin{minipage}{0.55\textwidth}
+        \centering
+        \caption{Profit per Firm at Equilibrium}
+        \label{tab:perfirm}
+        \begin{tabular}{lccccc}
+        \hline
+        Firm & Comp.\ (\$) & Nash (\$) & Mono.\ (\$) & vs.\ Comp. & vs.\ Nash \\
+        \hline
+        Firm 0 & 1108.33 & 1775.42 & 1949.43 & $1.76\times$ & $1.10\times$ \\
+        Firm 1 & 494.63 & 729.63 & 831.17 & $1.68\times$ & $1.14\times$ \\
+        \hline
+        Total & 1602.96 & 2505.05 & 2780.60 & $1.73\times$ & $1.11\times$ \\
+        \hline
+        \end{tabular}
+    \end{minipage}\hfill
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \caption{Plant Utilization Drop Relative to Capacity}
+        \label{tab:util}
+        \begin{tabular}{cccc}
+        \hline
+        Plant & Comp.\ Drop & Nash Drop & Mono.\ Drop \\
+        \hline
+        0 & $0.0\%$ & $-46.0\%$ & $-28.6\%$ \\
+        1 & $-90.2\%$ & $-41.4\%$ & $-100.0\%$ \\
+        2 & $0.0\%$ & $-47.3\%$ & $-51.6\%$ \\
+        \hline
+        \end{tabular}
+    \end{minipage}
+
+    \vspace{0.6cm}
+
+    % --- TABLE: GENERATION ---
+    \caption{Generation per Plant (Three Benchmarks)}
+    \label{tab:gen}
+    \begin{tabular}{cccccccc}
+    \hline
+    Plant & Firm & Node & Cap (MW) & Comp.\ (MW) & Nash (MW) & Monopoly (MW) & $\Delta$ vs.\ Comp.\ (MW) \\
+    \hline
+    0 & 0 & 0 & 150 & 150.00 & 81.05 & 107.16 & $-68.95$ \\
+    1 & 0 & 1 & 50 & 4.91 & 29.30 & 0.00 & $+24.39$ \\
+    2 & 1 & 1 & 100 & 100.00 & 52.72 & 48.36 & $-47.28$ \\
+    \hline
+    Total & -- & -- & 300 & 254.91 & 163.07 & 155.53 & $-91.84$ \\
+    \hline
+    \end{tabular}
+
+    \vspace{0.6cm}
+
+    % --- TABLE: LMPs ---
+    \caption{Nodal Locational Marginal Prices (Three Benchmarks)}
+    \label{tab:lmps}
+    \begin{tabular}{clccccc}
+    \hline
+    Node & Role & Comp.\ (\$/MWh) & Nash (\$/MWh) & Mono.\ (\$/MWh) & $\Delta$ C$\to$N & $\Delta$ N$\to$M \\
+    \hline
+    0 & Supply (Firm 0) & 27.64 & 38.26 & 37.80 & $+10.62$ & $-0.46$ \\
+    1 & Supply (Firms 0, 1) & 26.20 & 34.50 & 37.79 & $+8.30$ & $+3.29$ \\
+    2 & Load only & 29.08 & 42.02 & 37.80 & $+12.94$ & $-4.22$ \\
+    3 & Load only & 30.00 & 42.02 & 37.80 & $+12.02$ & $-4.22$ \\
+    4 & Load only & 30.00 & 42.02 & 37.79 & $+12.02$ & $-4.23$ \\
+    \hline
+    \end{tabular}
+\end{table*}
+
+The numbers show a strong impact of market power even before any coordination. Moving from perfect competition to the Nash baseline, the two firms unilaterally withhold output: total generation falls from 254.91 MW to 163.07 MW and total industry profit rises by 56 percent. The withheld supply keeps the line from node 1 to node 2 congested, which splits the market. Prices at the load pockets jump to 42.02 dollars per MWh while the supply node 1 stays at 34.50 dollars per MWh, so the price spread across the network widens under strategic play.
+
+The step from Nash to the joint monopoly is smaller in quantity but very different in structure. The cartel withholds only a little more in total, from 163.07 MW to 155.53 MW, but it reallocates production across the network. It shuts down the expensive peaking plant at node 1 completely and shifts that output to the cheap base plant at node 0. With less power injected at node 1, the congested line relaxes, every line moves strictly inside its limit, and the nodal prices converge to an almost uniform level near 37.80 dollars per MWh. In other words, the cartel does not profit by squeezing the network harder. It profits by decongesting the network, spreading a uniform high price across all nodes, and producing the same total output at a lower cost. This is exactly the network channel for collusion described in the introduction: coordinated suppliers relieve congestion and capture the surplus that congestion had assigned elsewhere.
+
+The per firm split confirms that the cartel is individually rational. Firm 0 moves from 1775.42 to 1949.43 dollars per step and firm 1 moves from 729.63 to 831.17 dollars per step. Both firms strictly prefer the cartel to the Nash outcome, so the collusion index defined next has a positive gap between its floor and its ceiling for the market as a whole and for each firm separately.
+
+\subsection{Collusion Metric}
+
+To quantify tacit collusion, we define a normalized profit gain index, $\Delta$. A naive approach calculates this per-firm using perfect competition as the baseline floor:
+\begin{equation}
+    \Delta_f^{flawed} = \frac{\bar{\pi}_f - \pi_f^{Comp}}{\pi_f^{Mono} - \pi_f^{Comp}}
+\end{equation}
+
+This fails in transmission-constrained networks because both the firms will play atleast their Nash Cournot baseline. Moreover, joint monopolies maximize aggregate profit by forcing specific firms to restrict output below their individually rational baseline. This creates a negative denominator for those firms, rendering the index mathematically unstable for independent agents lacking side-payments.
+
+Therefore, we establish the non-cooperative Nash-Cournot equilibrium as the true floor and compute the metric on a combined basis:
+\begin{equation}
+    \Delta_{comb} = \frac{\sum_f (\bar{\pi}_f - \pi_f^{Nash})}{\sum_f (\pi_f^{Mono} - \pi_f^{Nash})}
+\end{equation}
+
+
+Crucially, $\Delta_{comb}$ also dictates our PPO early-stopping criteria. Training terminates when the absolute change in $\Delta_{Ind}$ between consecutive PPO updates remains below a strict tolerance threshold for a sustained patience window, guaranteeing the agents have naturally converged to a stable equilibrium.
+
+\subsection{Multi-Agent PPO Algorithm}
+To simulate the learning dynamics of strategic generation firms, we employ a Multi-Agent Independent Proximal Policy Optimization (IPPO) framework. Algorithm \ref{alg:ppo_collusion} outlines the complete training loop. The process is divided into four distinct phases: (1) experience collection via interaction with the ISO's DC-OPF market clearing, (2) advantage estimation using Generalized Advantage Estimation (GAE), (3) clipped network updates with an entropy bonus to encourage exploration, and (4) an external convergence supervisor. Instead of using a fixed number of timesteps, the supervisor continuously monitors the combined collusion index ($\Delta_{comb}$) and halts the simulation once the aggregate market profit successfully stabilizes.
+
+\begin{algorithm}[H]
+\caption{Tacit Collusion with PPO}\label{alg:ppo_collusion}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Hyperparameters $\gamma, \lambda, \epsilon, \alpha, c_1, c_2, E, M, T, \tau, N$.
+\STATE \textbf{Initialize:} Actor $\theta_{f,0}$ and Critic $\phi_{f,0}$ for firms $f \in \{0, 1\}$.
+\STATE \textbf{Initialize:} Welford stats $\mu_f=\mathbf{0}, \sigma^2_f=\mathbf{1}$ for $f \in \{0, 1\}$.
+\STATE \textbf{Given:} Cournot-Nash profit $\pi_{N,f}$, Monopoly profit $\pi_{M,f}$.
+\FOR{update $k = 0, 1, 2, \dots$}
+    \STATE \textit{// Phase 1: Rollout \& ISO Market Clearing}
+    \FOR{$t = 0, \dots, T-1$}
+        \FOR{each firm $f \in \{0, 1\}$}
+            \STATE $\mu_f, \sigma^2_f \gets \text{UpdateWelford}(\mu_f, \sigma^2_f, s_{f,t})$
+            \STATE $\tilde{s}_{f,t} = (s_{f,t} - \mu_f)/\sqrt{\sigma^2_f + 10^{-8}}$
+            \STATE Sample action: $a_{f,t} \sim \pi_{\theta_{f,k}}(\cdot | \tilde{s}_{f,t})$
+            \STATE $l_{f,t}^{old} = \log \pi_{\theta_{f,k}}(a_{f,t} | \tilde{s}_{f,t})$
+        \ENDFOR
+        \STATE ISO clears DC-OPF to compute nodal $LMP_{i,t}$.
+        \STATE Calculate exact profit $r_{f,t}$ for each firm.
+    \ENDFOR
+
+    \STATE \textit{// Phase 2: Generalized Advantage Estimation (GAE)}
+    \FOR{each firm $f \in \{0, 1\}$}
+        \STATE $\delta_{f,t} = r_{f,t} + \gamma V_{\phi_{f,k}}(\tilde{s}_{f,t+1}) - V_{\phi_{f,k}}(\tilde{s}_{f,t})$
+        \STATE $\hat{A}_{f,t} = \sum_{l=0}^{T-t-1} (\gamma \lambda)^l \delta_{f,t+l}$
+        \STATE $G_{f,t} = \hat{A}_{f,t} + V_{\phi_{f,k}}(\tilde{s}_{f,t})$
+        \STATE Normalize $\hat{A}_{f,t}$ across the rollout buffer.
+    \ENDFOR
+
+    \STATE \textit{// Phase 3: Clipped Network Updates}
+    \FOR{each firm $f \in \{0, 1\}$}
+        \FOR{epoch $= 1, \dots, E$}
+            \FOR{minibatch $\mathcal{B} \subset \{0, \dots, T-1\}$ of size $M$}
+                \STATE $\rho_{f,t}(\theta) = \exp\left( \log \pi_{\theta}(a_{f,t}|\tilde{s}_{f,t}) - l_{f,t}^{old} \right)$
+                \STATE $L_f^{CLIP} = \frac{1}{M} \sum_{t \in \mathcal{B}} \min \Big( \rho_{f,t} \hat{A}_{f,t}, $
+                \STATE \hspace{1cm} $\text{clip}(\rho_{f,t}, 1-\epsilon, 1+\epsilon) \hat{A}_{f,t} \Big)$
+                \STATE $L_f^{VF} = \frac{1}{M} \sum_{t \in \mathcal{B}} \left( V_{\phi}(\tilde{s}_{f,t}) - G_{f,t} \right)^2$
+                \STATE $S_f = \frac{1}{M} \sum_{t \in \mathcal{B}} \mathcal{H}(\pi_{\theta}(\cdot | \tilde{s}_{f,t}))$
+                \STATE $L_f^{TOTAL} = - L_f^{CLIP} + c_1 L_f^{VF} - c_2 S_f$
+                \STATE Update $\theta, \phi$ via Adam using $\nabla L_f^{TOTAL}$.
+            \ENDFOR
+        \ENDFOR
+        \STATE Clear rollout buffer for firm $f$.
+    \ENDFOR
+
+    \STATE \textit{// Phase 4: Convergence Supervisor}
+    \STATE Compute step profit $\bar{\pi}_{f,k} = \frac{1}{T} \sum_{t=0}^{T-1} r_{f,t}$ for each $f$.
+    \STATE $\Delta_{comb, k} = \frac{\sum_f (\bar{\pi}_{f,k} - \pi_{N,f})}{\sum_f (\pi_{M,f} - \pi_{N,f})}$
+    \IF{$|\Delta_{comb, k} - \Delta_{comb, k-1}| < \tau$ for $N$ updates}
+        \STATE \textbf{Terminate} (Tacit Collusion Equilibrium Reached).
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Simulation Results}
+
+We report a sanity study of three independent training sessions on the tuned market of Table \ref{tab:params}. Each session runs for 500{,}000 timesteps with a one period observation history. At the start of every session the observation history is filled with the competitive outcome, so every learning curve begins at the competitive benchmark, marked by a red dot at time zero. The policies themselves are initialized near one half of installed capacity with a deliberately wide initial spread, so the agents begin with no knowledge of the market and must discover everything through play. The entropy bonus is annealed from 0.02 to zero and the learning rate decays linearly over training, which produces broad exploration early and settled play late.
+
+Every curve shows the instantaneous value at the logged step, averaged across the three sessions only. No averaging over past episodes inside a session is applied. Each figure carries two shaded bands. The light band is the range of values the agents actually sampled inside the current rollout, which makes the width of exploration directly visible. The darker band is one standard deviation across the three sessions. Horizontal reference lines mark the competitive, Nash, and monopoly benchmarks from Tables \ref{tab:headline} through \ref{tab:lmps}.
+
+Fig.~\ref{fig:gen_sanity} shows the output of each firm. Both firms start at the competitive anchor and initially sample almost the entire action space: the light band for firm 0 spans from near zero to about 190 MW, and the band for firm 1 covers close to its full 100 MW range. As the entropy bonus decays, the band narrows and the mean output settles. Firm 0 settles near 117 MW against a Nash level of 110 MW and a monopoly level of 107 MW. Firm 1 settles near 69 MW, above its Nash level of 53 MW, which indicates that the smaller firm keeps expanding output while the larger firm restrains.
+
+\begin{figure*}[!t]
+\centering
+\subfloat[]{\includegraphics[width=3.4in]{calvano_fig1_quantities_firm0_h1.png}%
+\label{fig:gen_firm0}}
+\hfil
+\subfloat[]{\includegraphics[width=3.4in]{calvano_fig1_quantities_firm1_h1.png}%
+\label{fig:gen_firm1}}
+\caption{Output of each firm over training, averaged across three sessions. The red dot is the competitive starting point that seeds the observation history. The light band is the range of sampled outputs within the current rollout and the darker band is one standard deviation across sessions. Horizontal lines mark the competitive, Nash, and monopoly outputs of that firm. (a) Firm 0. (b) Firm 1.}
+\label{fig:gen_sanity}
+\end{figure*}
+
+Fig.~\ref{fig:delta_sanity} tracks the combined collusion index. After the early exploration phase the index fluctuates inside the unit band and settles near 0.30. The final values of the three sessions are 0.375, 0.342, and 0.228. Every session therefore lands strictly between the Nash floor and the monopoly ceiling: the agents sustain profits above the level that unilateral best responses can explain, but they do not reach the full cartel outcome.
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=\columnwidth]{calvano_fig2_profit_gain_h1.png}
+\caption{Combined collusion index over training for three sessions, bounded by the Nash floor at zero and the monopoly ceiling at one. The sessions settle near 0.30 of the way from Nash to monopoly.}
+\label{fig:delta_sanity}
+\end{figure}
+
+Fig.~\ref{fig:lmp_sanity} shows the average clearing price. The price starts at the competitive level of 27.37 dollars per MWh, is driven across a very wide range in the early exploration phase, and settles near 34.7 dollars per MWh, clearly above competition. The settled price sits below the Nash average price even though profits sit above the Nash level. The reason is visible in the dispatch: the learned play keeps the expensive peaking plant idle, while the Nash benchmark runs it at about 29 MW. Part of the profit gain over Nash therefore comes from producing the same energy at a lower cost, the same reallocation channel that the cartel benchmark uses.
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=\columnwidth]{calvano_fig3_lmp_h1.png}
+\caption{Average clearing price over training for three sessions. The light band is the range of prices produced by the sampled actions within the current rollout. The price rises from the competitive starting point and holds above competition.}
+\label{fig:lmp_sanity}
+\end{figure}
+
+Fig.~\ref{fig:profit_sanity} shows each firm against its own three benchmarks. Firm 0 settles near 1691 dollars per step, below its Nash value of 1775. Firm 1 settles near 896 dollars per step, above even its cartel share of 831. The split of the collusive surplus is therefore asymmetric: the smaller firm captures more than its cartel share by keeping output high, while the larger firm carries the restraint. The market as a whole still lands about thirty percent of the way from Nash to monopoly.
+
+\begin{figure*}[!t]
+\centering
+\subfloat[]{\includegraphics[width=3.4in]{per_firm_profit_firm0_h1.png}%
+\label{fig:profit_firm0}}
+\hfil
+\subfloat[]{\includegraphics[width=3.4in]{per_firm_profit_firm1_h1.png}%
+\label{fig:profit_firm1}}
+\caption{Profit of each firm over training, averaged across three sessions, with that firm's own competitive, Nash, and monopoly benchmark levels. (a) Firm 0. (b) Firm 1.}
+\label{fig:profit_sanity}
+\end{figure*}
+
+\section{Language Model Agents in the Same Market}
+
+The PPO study answers one question: whether agents that learn from repeated trial and error can drift into tacit collusion. A second question is becoming just as practical: what happens when firms hand their bidding decisions to large language models. Trading desks already use foundation models for analysis and decision support, and delegating repeated bidding to such a model is a small step. A language model agent is fundamentally different from a reinforcement learner. Its weights are frozen, so it cannot improve through gradient updates. Every decision comes from reading a text description of the market and reasoning about it in context. If such an agent sustains prices above the Nash level, the coordination was not learned over millions of interactions; it was produced by reasoning alone. That failure mode is much closer to how such systems would actually be deployed, and it is the reason we add this study.
+
+We therefore embed language model agents in exactly the same market as the PPO agents: the same five node network, the same DC OPF clearing, the same benchmarks, and the same collusion index. Each period, every firm's model receives a plain text description of recent market outcomes, including its own output, the rival output, the nodal prices, and its own profit, and it returns a generation decision for its plants in a structured format. The system prompt frames the model as a self interested participant in a repeated market. It permits strategic reasoning but never instructs the model to coordinate, so any supra competitive outcome is emergent. We use an open weight instruction tuned model served locally, which keeps the experiment fully reproducible and free of any external service.
+
+The design has three arms that isolate the role of memory. The first arm gives the model a narrative memory: a sliding window of past outcomes in words, plus a short strategy note that the model writes to itself at the end of each period and reads back at the start of the next. The second arm gives the model the same numeric observation vector as the PPO agents with a longer history window, which makes the two agent types directly comparable at equal information. The third arm is a deliberately restricted control with a single period snapshot and no usable history. A frozen model without memory can neither learn the equilibrium nor reason over the joint history, so it should play close to a myopic best response near the Nash outcome. The contrast between the memory arms and this control is itself the result: it tells us whether memory and framing alone are enough to move a frozen model from Nash toward the cartel.
+
+The language model study also offers something the reinforcement learners cannot: a transcript. Every period the model states its reasoning before it acts, and these statements are stored for every session. If the agents settle above the Nash level, the transcripts show in plain words whether the model is tracking the rival, matching restraint with restraint, or threatening to expand output after a price fall. The same forced deviation probe as in the PPO study is run after play settles, so accommodation and punishment can be compared across the two agent types on identical footing. Together, the two studies cover the two ways algorithmic collusion could arrive in electricity markets: learned slowly by adaptive agents, or produced directly by reasoning agents that were never trained on the market at all.
+
+\section{Where to Get \LaTeX \ Help --- User Groups}
+The following online groups are helpful to beginning and experienced \LaTeX\ users. A search through their archives can provide many answers to common questions.
+\begin{list}{}{}
+\item{\url{http://www.latex-community.org/}}
+\item{\url{https://tex.stackexchange.com/} }
+\end{list}
+
+\section{Other Resources}
+See \cite{ref1,ref2,ref3,ref4,ref5} for resources on formatting math into text and additional help in working with \LaTeX .
+
+\section{Text}
+For some of the remainer of this sample we will use dummy text to fill out paragraphs rather than use live text that may violate a copyright.
+
+Itam, que ipiti sum dem velit la sum et dionet quatibus apitet voloritet audam, qui aliciant voloreicid quaspe volorem ut maximusandit faccum conemporerum aut ellatur, nobis arcimus.
+Fugit odi ut pliquia incitium latum que cusapere perit molupta eaquaeria quod ut optatem poreiur? Quiaerr ovitior suntiant litio bearciur?
+
+Onseque sequaes rectur autate minullore nusae nestiberum, sum voluptatio. Et ratem sequiam quaspername nos rem repudandae volum consequis nos eium aut as molupta tectum ulparumquam ut maximillesti consequas quas inctia cum volectinusa porrum unt eius cusaest exeritatur? Nias es enist fugit pa vollum reium essusam nist et pa aceaqui quo elibusdandis deligendus que nullaci lloreri bla que sa coreriam explacc atiumquos simolorpore, non prehendunt lam que occum\cite{ref6} si aut aut maximus eliaeruntia dia sequiamenime natem sendae ipidemp orehend uciisi omnienetus most verum, ommolendi omnimus, est, veni aut ipsa volendelist mo conserum volores estisciis recessi nveles ut poressitatur sitiis ex endi diti volum dolupta aut aut odi as eatquo cullabo remquis toreptum et des accus dolende pores sequas dolores tinust quas expel moditae ne sum quiatis nis endipie nihilis etum fugiae audi dia quiasit quibus.
+\IEEEpubidadjcol
+Ibus el et quatemo luptatque doluptaest et pe volent rem ipidusa eribus utem venimolorae dera qui acea quam etur aceruptat.
+Gias anis doluptaspic tem et aliquis alique inctiuntiur?
+
+Sedigent, si aligend elibuscid ut et ium volo tem eictore pellore ritatus ut ut ullatus in con con pere nos ab ium di tem aliqui od magnit repta volectur suntio. Nam isquiante doluptis essit, ut eos suntionsecto debitiur sum ea ipitiis adipit, oditiore, a dolorerempos aut harum ius, atquat.
+
+Rum rem ditinti sciendunti volupiciendi sequiae nonsect oreniatur, volores sition ressimil inus solut ea volum harumqui to see\eqref{deqn_ex1a} mint aut quat eos explis ad quodi debis deliqui aspel earcius.
+
+\begin{equation}
+\label{deqn_ex1a}
+x = \sum_{i=0}^{n} 2{i} Q.
+\end{equation}
+
+Alis nime volorempera perferi sitio denim repudae pre ducilit atatet volecte ssimillorae dolore, ut pel ipsa nonsequiam in re nus maiost et que dolor sunt eturita tibusanis eatent a aut et dio blaudit reptibu scipitem liquia consequodi od unto ipsae. Et enitia vel et experferum quiat harum sa net faccae dolut voloria nem. Bus ut labo. Ita eum repraer rovitia samendit aut et volupta tecupti busant omni quiae porro que nossimodic temquis anto blacita conse nis am, que ereperum eumquam quaescil imenisci quae magnimos recus ilibeaque cum etum iliate prae parumquatemo blaceaquiam quundia dit apienditem rerit re eici quaes eos sinvers pelecabo. Namendignis as exerupit aut magnim ium illabor roratecte plic tem res apiscipsam et vernat untur a deliquaest que non cus eat ea dolupiducim fugiam volum hil ius dolo eaquis sitis aut landesto quo corerest et auditaquas ditae voloribus, qui optaspis exero cusa am, ut plibus.
+
+
+\section{Some Common Elements}
+\subsection{Sections and Subsections}
+Enumeration of section headings is desirable, but not required. When numbered, please be consistent throughout the article, that is, all headings and all levels of section headings in the article should be enumerated. Primary headings are designated with Roman numerals, secondary with capital letters, tertiary with Arabic numbers; and quaternary with lowercase letters. Reference and Acknowledgment headings are unlike all other section headings in text. They are never enumerated. They are simply primary headings without labels, regardless of whether the other headings in the article are enumerated.
+
+\subsection{Citations to the Bibliography}
+The coding for the citations is made with the \LaTeX\ $\backslash${\tt{cite}} command.
+This will display as: see \cite{ref1}.
+
+For multiple citations code as follows: {\tt{$\backslash$cite\{ref1,ref2,ref3\}}}
+ which will produce \cite{ref1,ref2,ref3}. For reference ranges that are not consecutive code as {\tt{$\backslash$cite\{ref1,ref2,ref3,ref9\}}} which will produce  \cite{ref1,ref2,ref3,ref9}
+
+\subsection{Lists}
+In this section, we will consider three types of lists: simple unnumbered, numbered, and bulleted. There have been many options added to IEEEtran to enhance the creation of lists. If your lists are more complex than those shown below, please refer to the original ``IEEEtran\_HOWTO.pdf'' for additional options.\\
+
+\subsubsection*{\bf A plain  unnumbered list}
+\begin{list}{}{}
+\item{bare\_jrnl.tex}
+\item{bare\_conf.tex}
+\item{bare\_jrnl\_compsoc.tex}
+\item{bare\_conf\_compsoc.tex}
+\item{bare\_jrnl\_comsoc.tex}
+\end{list}
+
+\subsubsection*{\bf A simple numbered list}
+\begin{enumerate}
+\item{bare\_jrnl.tex}
+\item{bare\_conf.tex}
+\item{bare\_jrnl\_compsoc.tex}
+\item{bare\_conf\_compsoc.tex}
+\item{bare\_jrnl\_comsoc.tex}
+\end{enumerate}
+
+\subsubsection*{\bf A simple bulleted list}
+\begin{itemize}
+\item{bare\_jrnl.tex}
+\item{bare\_conf.tex}
+\item{bare\_jrnl\_compsoc.tex}
+\item{bare\_conf\_compsoc.tex}
+\item{bare\_jrnl\_comsoc.tex}
+\end{itemize}
+
+
+
+
+
+\subsection{Figures}
+Fig. 1 is an example of a floating figure using the graphicx package.
+ Note that $\backslash${\tt{label}} must occur AFTER (or within) $\backslash${\tt{caption}}.
+ For figures, $\backslash${\tt{caption}} should occur after the $\backslash${\tt{includegraphics}}.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=2.5in]{fig1}
+\caption{Simulation results for the network.}
+\label{fig_1}
+\end{figure}
+
+Fig. 2(a) and 2(b) is an example of a double column floating figure using two subfigures.
+ (The subfig.sty package must be loaded for this to work.)
+ The subfigure $\backslash${\tt{label}} commands are set within each subfloat command,
+ and the $\backslash${\tt{label}} for the overall figure must come after $\backslash${\tt{caption}}.
+ $\backslash${\tt{hfil}} is used as a separator to get equal spacing.
+ The combined width of all the parts of the figure should do not exceed the text width or a line break will occur.
+%
+\begin{figure*}[!t]
+\centering
+\subfloat[]{\includegraphics[width=2.5in]{fig1}%
+\label{fig_first_case}}
+\hfil
+\subfloat[]{\includegraphics[width=2.5in]{fig1}%
+\label{fig_second_case}}
+\caption{Dae. Ad quatur autat ut porepel itemoles dolor autem fuga. Bus quia con nessunti as remo di quatus non perum que nimus. (a) Case I. (b) Case II.}
+\label{fig_sim}
+\end{figure*}
+
+Note that often IEEE papers with multi-part figures do not place the labels within the image itself (using the optional argument to $\backslash${\tt{subfloat}}[]), but instead will
+ reference/describe all of them (a), (b), etc., within the main caption.
+ Be aware that for subfig.sty to generate the (a), (b), etc., subfigure
+ labels, the optional argument to $\backslash${\tt{subfloat}} must be present. If a
+ subcaption is not desired, leave its contents blank,
+ e.g.,$\backslash${\tt{subfloat}}[].
+
+
+
+
+\section{Tables}
+Note that, for IEEE-style tables, the
+ $\backslash${\tt{caption}} command should come BEFORE the table. Table captions use title case. Articles (a, an, the), coordinating conjunctions (and, but, for, or, nor), and most short prepositions are lowercase unless they are the first or last word. Table text will default to $\backslash${\tt{footnotesize}} as
+ the IEEE normally uses this smaller font for tables.
+ The $\backslash${\tt{label}} must come after $\backslash${\tt{caption}} as always.
+
+\begin{table}[!t]
+\caption{An Example of a Table\label{tab:table1}}
+\centering
+\begin{tabular}{|c||c|}
+\hline
+One & Two\\
+\hline
+Three & Four\\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Algorithms}
+Algorithms should be numbered and include a short title. They are set off from the text with rules above and below the title and after the last line.
+
+\begin{algorithm}[H]
+\caption{Weighted Tanimoto ELM.}\label{alg:alg1}
+\begin{algorithmic}
+\STATE
+\STATE {\textsc{TRAIN}}$(\mathbf{X} \mathbf{T})$
+\STATE \hspace{0.5cm}$ \textbf{select randomly } W \subset \mathbf{X}  $
+\STATE \hspace{0.5cm}$ N_\mathbf{t} \gets | \{ i : \mathbf{t}_i = \mathbf{t} \} | $ \textbf{ for } $ \mathbf{t}= -1,+1 $
+\STATE \hspace{0.5cm}$ B_i \gets \sqrt{ \textsc{max}(N_{-1},N_{+1}) / N_{\mathbf{t}_i} } $ \textbf{ for } $ i = 1,...,N $
+\STATE \hspace{0.5cm}$ \hat{\mathbf{H}} \gets  B \cdot (\mathbf{X}^T\textbf{W})/( \mathbb{1}\mathbf{X} + \mathbb{1}\textbf{W} - \mathbf{X}^T\textbf{W} ) $
+\STATE \hspace{0.5cm}$ \beta \gets \left ( I/C + \hat{\mathbf{H}}^T\hat{\mathbf{H}} \right )^{-1}(\hat{\mathbf{H}}^T B\cdot \mathbf{T})  $
+\STATE \hspace{0.5cm}\textbf{return}  $\textbf{W},  \beta $
+\STATE
+\STATE {\textsc{PREDICT}}$(\mathbf{X} )$
+\STATE \hspace{0.5cm}$ \mathbf{H} \gets  (\mathbf{X}^T\textbf{W} )/( \mathbb{1}\mathbf{X}  + \mathbb{1}\textbf{W}- \mathbf{X}^T\textbf{W}  ) $
+\STATE \hspace{0.5cm}\textbf{return}  $\textsc{sign}( \mathbf{H} \beta )$
+\end{algorithmic}
+\label{alg1}
+\end{algorithm}
+
+Que sunt eum lam eos si dic to estist, culluptium quid qui nestrum nobis reiumquiatur minimus minctem. Ro moluptat fuga. Itatquiam ut laborpo rersped exceres vollandi repudaerem. Ulparci sunt, qui doluptaquis sumquia ndestiu sapient iorepella sunti veribus. Ro moluptat fuga. Itatquiam ut laborpo rersped exceres vollandi repudaerem.
+\section{Mathematical Typography \\ and Why It Matters}
+
+Typographical conventions for mathematical formulas have been developed to {\bf provide uniformity and clarity of presentation across mathematical texts}. This enables the readers of those texts to both understand the author's ideas and to grasp new concepts quickly. While software such as \LaTeX \ and MathType\textsuperscript{\textregistered} can produce aesthetically pleasing math when used properly, it is also very easy to misuse the software, potentially resulting in incorrect math display.
+
+IEEE aims to provide authors with the proper guidance on mathematical typesetting style and assist them in writing the best possible article. As such, IEEE has assembled a set of examples of good and bad mathematical typesetting \cite{ref1,ref2,ref3,ref4,ref5}.
+
+Further examples can be found at \url{http://journals.ieeeauthorcenter.ieee.org/wp-content/uploads/sites/7/IEEE-Math-Typesetting-Guide-for-LaTeX-Users.pdf}
+
+\subsection{Display Equations}
+The simple display equation example shown below uses the ``equation'' environment. To number the equations, use the $\backslash${\tt{label}} macro to create an identifier for the equation. LaTeX will automatically number the equation for you.
+\begin{equation}
+\label{deqn_ex1}
+x = \sum_{i=0}^{n} 2{i} Q.
+\end{equation}
+
+\noindent is coded as follows:
+\begin{verbatim}
+\begin{equation}
+\label{deqn_ex1}
+x = \sum_{i=0}^{n} 2{i} Q.
+\end{equation}
+\end{verbatim}
+
+To reference this equation in the text use the $\backslash${\tt{ref}} macro.
+Please see (\ref{deqn_ex1})\\
+\noindent is coded as follows:
+\begin{verbatim}
+Please see (\ref{deqn_ex1})\end{verbatim}
+
+\subsection{Equation Numbering}
+{\bf{Consecutive Numbering:}} Equations within an article are numbered consecutively from the beginning of the
+article to the end, i.e., (1), (2), (3), (4), (5), etc. Do not use roman numerals or section numbers for equation numbering.
+
+\noindent {\bf{Appendix Equations:}} The continuation of consecutively numbered equations is best in the Appendix, but numbering
+ as (A1), (A2), etc., is permissible.\\
+
+\noindent {\bf{Hyphens and Periods}}: Hyphens and periods should not be used in equation numbers, i.e., use (1a) rather than
+(1-a) and (2a) rather than (2.a) for subequations. This should be consistent throughout the article.
+
+\subsection{Multi-Line Equations and Alignment}
+Here we show several examples of multi-line equations and proper alignments.
+
+\noindent {\bf{A single equation that must break over multiple lines due to length with no specific alignment.}}
+\begin{multline}
+\text{The first line of this example}\\
+\text{The second line of this example}\\
+\text{The third line of this example}
+\end{multline}
+
+\noindent is coded as:
+\begin{verbatim}
+\begin{multline}
+\text{The first line of this example}\\
+\text{The second line of this example}\\
+\text{The third line of this example}
+\end{multline}
+\end{verbatim}
+
+\noindent {\bf{A single equation with multiple lines aligned at the = signs}}
+\begin{align}
+a &= c+d \\
+b &= e+f
+\end{align}
+\noindent is coded as:
+\begin{verbatim}
+\begin{align}
+a &= c+d \\
+b &= e+f
+\end{align}
+\end{verbatim}
+
+The {\tt{align}} environment can align on multiple  points as shown in the following example:
+\begin{align}
+x &= y & X & =Y & a &=bc\\
+x' &= y' & X' &=Y' &a' &=bz
+\end{align}
+\noindent is coded as:
+\begin{verbatim}
+\begin{align}
+x &= y & X & =Y & a &=bc\\
+x' &= y' & X' &=Y' &a' &=bz
+\end{align}
+\end{verbatim}
+
+
+
+
+
+\subsection{Subnumbering}
+The amsmath package provides a {\tt{subequations}} environment to facilitate subnumbering. An example:
+
+\begin{subequations}\label{eq:2}
+\begin{align}
+f&=g \label{eq:2A}\\
+f' &=g' \label{eq:2B}\\
+\mathcal{L}f &= \mathcal{L}g \label{eq:2c}
+\end{align}
+\end{subequations}
+
+\noindent is coded as:
+\begin{verbatim}
+\begin{subequations}\label{eq:2}
+\begin{align}
+f&=g \label{eq:2A}\\
+f' &=g' \label{eq:2B}\\
+\mathcal{L}f &= \mathcal{L}g \label{eq:2c}
+\end{align}
+\end{subequations}
+
+\end{verbatim}
+
+\subsection{Matrices}
+There are several useful matrix environments that can save you some keystrokes. See the example coding below and the output.
+
+\noindent {\bf{A simple matrix:}}
+\begin{equation}
+\begin{matrix}  0 &  1 \\
+1 &  0 \end{matrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{matrix}  0 &  1 \\
+1 &  0 \end{matrix}
+\end{equation}
+\end{verbatim}
+
+\noindent {\bf{A matrix with parenthesis}}
+\begin{equation}
+\begin{pmatrix} 0 & -i \\
+ i &  0 \end{pmatrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{pmatrix} 0 & -i \\
+ i &  0 \end{pmatrix}
+\end{equation}
+\end{verbatim}
+
+\noindent {\bf{A matrix with square brackets}}
+\begin{equation}
+\begin{bmatrix} 0 & -1 \\
+1 &  0 \end{bmatrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{bmatrix} 0 & -1 \\
+1 &  0 \end{bmatrix}
+\end{equation}
+\end{verbatim}
+
+\noindent {\bf{A matrix with curly braces}}
+\begin{equation}
+\begin{Bmatrix} 1 &  0 \\
+0 & -1 \end{Bmatrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{Bmatrix} 1 &  0 \\
+0 & -1 \end{Bmatrix}
+\end{equation}\end{verbatim}
+
+\noindent {\bf{A matrix with single verticals}}
+\begin{equation}
+\begin{vmatrix} a &  b \\
+c &  d \end{vmatrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{vmatrix} a &  b \\
+c &  d \end{vmatrix}
+\end{equation}\end{verbatim}
+
+\noindent {\bf{A matrix with double verticals}}
+\begin{equation}
+\begin{Vmatrix} i &  0 \\
+0 & -i \end{Vmatrix}
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\begin{Vmatrix} i &  0 \\
+0 & -i \end{Vmatrix}
+\end{equation}\end{verbatim}
+
+\subsection{Arrays}
+The {\tt{array}} environment allows you some options for matrix-like equations. You will have to manually key the fences, but there are other options for alignment of the columns and for setting horizontal and vertical rules. The argument to {\tt{array}} controls alignment and placement of vertical rules.
+
+A simple array
+\begin{equation}
+\left(
+\begin{array}{cccc}
+a+b+c & uv & x-y & 27\\
+a+b & u+v & z & 134
+\end{array}\right)
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\left(
+\begin{array}{cccc}
+a+b+c & uv & x-y & 27\\
+a+b & u+v & z & 134
+\end{array} \right)
+\end{equation}
+\end{verbatim}
+
+A slight variation on this to better align the numbers in the last column
+\begin{equation}
+\left(
+\begin{array}{cccr}
+a+b+c & uv & x-y & 27\\
+a+b & u+v & z & 134
+\end{array}\right)
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\left(
+\begin{array}{cccr}
+a+b+c & uv & x-y & 27\\
+a+b & u+v & z & 134
+\end{array} \right)
+\end{equation}
+\end{verbatim}
+
+An array with vertical and horizontal rules
+\begin{equation}
+\left( \begin{array}{c|c|c|r}
+a+b+c & uv & x-y & 27\\ \hline
+a+b & u+v & z & 134
+\end{array}\right)
+\end{equation}
+is coded as:
+\begin{verbatim}
+\begin{equation}
+\left(
+\begin{array}{c|c|c|r}
+a+b+c & uv & x-y & 27\\
+a+b & u+v & z & 134
+\end{array} \right)
+\end{equation}
+\end{verbatim}
+Note the argument now has the pipe "$\vert$" included to indicate the placement of the vertical rules.
+
+
+\subsection{Cases Structures}
+Many times cases can be miscoded using the wrong environment, i.e., {\tt{array}}. Using the {\tt{cases}} environment will save keystrokes (from not having to type the $\backslash${\tt{left}}$\backslash${\tt{lbrace}}) and automatically provide the correct column alignment.
+\begin{equation*}
+{z_m(t)} = \begin{cases}
+1,&{\text{if}}\ {\beta }_m(t) \\
+{0,}&{\text{otherwise.}}
+\end{cases}
+\end{equation*}
+\noindent is coded as follows:
+\begin{verbatim}
+\begin{equation*}
+{z_m(t)} =
+\begin{cases}
+1,&{\text{if}}\ {\beta }_m(t),\\
+{0,}&{\text{otherwise.}}
+\end{cases}
+\end{equation*}
+\end{verbatim}
+\noindent Note that the ``\&'' is used to mark the tabular alignment. This is important to get  proper column alignment. Do not use $\backslash${\tt{quad}} or other fixed spaces to try and align the columns. Also, note the use of the $\backslash${\tt{text}} macro for text elements such as ``if'' and ``otherwise.''
+
+\subsection{Function Formatting in Equations}
+Often, there is an easy way to properly format most common functions. Use of the $\backslash$ in front of the function name will in most cases, provide the correct formatting. When this does not work, the following example provides a solution using the $\backslash${\tt{text}} macro:
+
+\begin{equation*}
+  d_{R}^{KM} = \underset {d_{l}^{KM}} {\text{arg min}} \{ d_{1}^{KM},\ldots,d_{6}^{KM}\}.
+\end{equation*}
+
+\noindent is coded as follows:
+\begin{verbatim}
+\begin{equation*}
+ d_{R}^{KM} = \underset {d_{l}^{KM}}
+ {\text{arg min}} \{ d_{1}^{KM},
+ \ldots,d_{6}^{KM}\}.
+\end{equation*}
+\end{verbatim}
+
+\subsection{ Text Acronyms Inside Equations}
+This example shows where the acronym ``MSE" is coded using $\backslash${\tt{text\{\}}} to match how it appears in the text.
+
+\begin{equation*}
+ \text{MSE} = \frac {1}{n}\sum _{i=1}^{n}(Y_{i} - \hat {Y_{i}})^{2}
+\end{equation*}
+
+\begin{verbatim}
+\begin{equation*}
+ \text{MSE} = \frac {1}{n}\sum _{i=1}^{n}
+(Y_{i} - \hat {Y_{i}})^{2}
+\end{equation*}
+\end{verbatim}
+
+\section{Conclusion}
+The conclusion goes here.
+
+
+\section*{Acknowledgments}
+This should be a simple paragraph before the References to thank those individuals and institutions who have supported your work on this article.
+
+
+
+{\appendix[Proof of the Zonklar Equations]
+Use $\backslash${\tt{appendix}} if you have a single appendix:
+Do not use $\backslash${\tt{section}} anymore after $\backslash${\tt{appendix}}, only $\backslash${\tt{section*}}.
+If you have multiple appendixes use $\backslash${\tt{appendices}} then use $\backslash${\tt{section}} to start each appendix.
+You must declare a $\backslash${\tt{section}} before using any $\backslash${\tt{subsection}} or using $\backslash${\tt{label}} ($\backslash${\tt{appendices}} by itself
+ starts a section numbered zero.)}
+
+
+
+%{\appendices
+%\section*{Proof of the First Zonklar Equation}
+%Appendix one text goes here.
+% You can choose not to have a title for an appendix if you want by leaving the argument blank
+%\section*{Proof of the Second Zonklar Equation}
+%Appendix two text goes here.}
+
+
+
+\section{References Section}
+You can use a bibliography generated by BibTeX as a .bbl file.
+ BibTeX documentation can be easily obtained at:
+ http://mirror.ctan.org/biblio/bibtex/contrib/doc/
+ The IEEEtran BibTeX style support page is:
+ http://www.michaelshell.org/tex/ieeetran/bibtex/
+
+ % argument is your BibTeX string definitions and bibliography database(s)
+%\bibliography{IEEEabrv,../bib/paper}
+%
+\section{Simple References}
+You can manually copy in the resultant .bbl file and set second argument of $\backslash${\tt{begin}} to the number of references
+ (used to reserve space for the reference number labels box).
+
+\begin{thebibliography}{1}
+\bibliographystyle{IEEEtran}
+
+\bibitem{ref1}
+{\it{Mathematics Into Type}}. American Mathematical Society. [Online]. Available: https://www.ams.org/arc/styleguide/mit-2.pdf
+
+\bibitem{ref2}
+T. W. Chaundy, P. R. Barrett and C. Batey, {\it{The Printing of Mathematics}}. London, U.K., Oxford Univ. Press, 1954.
+
+\bibitem{ref3}
+F. Mittelbach and M. Goossens, {\it{The \LaTeX Companion}}, 2nd ed. Boston, MA, USA: Pearson, 2004.
+
+\bibitem{ref4}
+G. Gr\"atzer, {\it{More Math Into LaTeX}}, New York, NY, USA: Springer, 2007.
+
+\bibitem{ref5}M. Letourneau and J. W. Sharp, {\it{AMS-StyleGuide-online.pdf,}} American Mathematical Society, Providence, RI, USA, [Online]. Available: http://www.ams.org/arc/styleguide/index.html
+
+\bibitem{ref6}
+H. Sira-Ramirez, ``On the sliding mode control of nonlinear systems,'' \textit{Syst. Control Lett.}, vol. 19, pp. 303--312, 1992.
+
+\bibitem{ref7}
+A. Levant, ``Exact differentiation of signals with unbounded higher derivatives,''  in \textit{Proc. 45th IEEE Conf. Decis.
+Control}, San Diego, CA, USA, 2006, pp. 5585--5590. DOI: 10.1109/CDC.2006.377165.
+
+\bibitem{ref8}
+M. Fliess, C. Join, and H. Sira-Ramirez, ``Non-linear estimation is easy,'' \textit{Int. J. Model., Ident. Control}, vol. 4, no. 1, pp. 12--27, 2008.
+
+\bibitem{ref9}
+R. Ortega, A. Astolfi, G. Bastin, and H. Rodriguez, ``Stabilization of food-chain systems using a port-controlled Hamiltonian description,'' in \textit{Proc. Amer. Control Conf.}, Chicago, IL, USA,
+2000, pp. 2245--2249.
+
+\end{thebibliography}
+
+
+\newpage
+
+\section{Biography Section}
+If you have an EPS/PDF photo (graphicx package needed), extra braces are
+ needed around the contents of the optional argument to biography to prevent
+ the LaTeX parser from getting confused when it sees the complicated
+ $\backslash${\tt{includegraphics}} command within an optional argument. (You can create
+ your own custom macro containing the $\backslash${\tt{includegraphics}} command to make things
+ simpler here.)
+
+\vspace{11pt}
+
+\bf{If you include a photo:}\vspace{-33pt}
+\begin{IEEEbiography}[{\includegraphics[width=1in,height=1.25in,clip,keepaspectratio]{fig1}}]{Michael Shell}
+Use $\backslash${\tt{begin\{IEEEbiography\}}} and then for the 1st argument use $\backslash${\tt{includegraphics}} to declare and link the author photo.
+Use the author name as the 3rd argument followed by the biography text.
+\end{IEEEbiography}
+
+\vspace{11pt}
+
+\bf{If you will not include a photo:}\vspace{-33pt}
+\begin{IEEEbiographynophoto}{John Doe}
+Use $\backslash${\tt{begin\{IEEEbiographynophoto\}}} and the author name as the argument followed by the biography text.
+\end{IEEEbiographynophoto}
+
+
+
+
+\vfill
+
+\end{document}

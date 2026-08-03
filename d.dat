@@ -1,0 +1,57 @@
+# d.dat  —  SHARED data for nc.mod (PATH) and m.mod (KNITRO).
+# Five-node Liu & Hobbs network. Node 5 is the PTDF reference (hub), w_5 = 0.
+# Firms are numeric: firm 1 = large firm, firm 2 = small firm.
+# Generators (firm,node): (1,1) (1,2) (2,2).  Nodes 3,4,5 are load-only.
+
+param N := 5;          # nodes  (node N = hub / PTDF reference)
+param L := 5;          # transmission lines
+
+set G :=
+(1,1) (1,2) (2,2);
+
+param CAP :=
+[*,*]  1 1   150
+       1 2    50
+       2 2   100;
+
+param MC :=
+[*,*]  1 1   22
+       1 2   22
+       2 2   25;
+
+param QC :=
+[*,*]  1 1   0.02
+       1 2   0.02
+       2 2   0.01;
+
+param P0 :=
+1  55
+2  50
+3  60
+4  55
+5  55;
+
+param Q0 :=
+1  250
+2  200
+3  40
+4  35
+5  25;
+
+param T :=
+1  40
+2  16
+3  23
+4  21
+5  8.5;
+
+# PTDF[l,i]: flow on line l from a unit injection at node i (reference node 5
+# excluded -> columns are the spokes 1..N-1 only).
+# Lines: 1:(1-2) 2:(2-3) 3:(3-1) 4:(3-4) 5:(4-5).  Loop reactances equal (x=1).
+param PTDF :
+        1           2           3    4   :=
+1    0.3333333  -0.3333333   0    0
+2    0.3333333   0.6666667   0    0
+3   -0.6666667  -0.3333333   0    0
+4    1           1           1    0
+5    1           1           1    1;

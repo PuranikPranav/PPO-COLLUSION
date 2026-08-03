@@ -1,0 +1,31 @@
+# ============================================================
+# NEOS Commands — stacked KKT Nash (matches Python ppo.py MCP)
+# ============================================================
+# Model box : model.mod
+# Data box  : data.dat
+# Solver    : PATH
+# ============================================================
+
+option solver path;
+option path_options "convergence_tolerance=1e-8";
+solve;
+
+param LMP_post {NODES};
+let {i in NODES} LMP_post[i] :=
+    P0[i] - (P0[i]/Q0[i]) * (sum {ff in FIRMS: (ff,i) in PLANTS} g[ff,i] + y[i]);
+
+param Firm_Profit_post {FIRMS};
+let {f in FIRMS} Firm_Profit_post[f] :=
+    sum {i in NODES: (f,i) in PLANTS} (
+        LMP_post[i] * g[f,i] - (MC[f,i]*g[f,i] + 0.5*QC[f,i]*g[f,i]^2)
+    );
+
+param Total_Profit_post;
+let Total_Profit_post := sum {f in FIRMS} Firm_Profit_post[f];
+param Total_Gen_post;
+let Total_Gen_post := sum {(f,i) in PLANTS} g[f,i];
+
+printf "\n=== Nash-Cournot stacked KKT (PATH) — matches Python MCP ===\n";
+display g;
+display LMP_post;
+display Firm_Profit_post, Total_Profit_post, Total_Gen_post;

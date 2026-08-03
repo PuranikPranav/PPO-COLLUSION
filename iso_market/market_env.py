@@ -46,6 +46,9 @@ OBS_MARKET_FEATURES_PER_STEP = NUM_NODES + 10  # 15 when num_lines == 5
 # Back-compat alias (older scripts import this name).
 OBS_FEATURES_PER_STEP = OBS_MARKET_FEATURES_PER_STEP
 
+# Solver tolerances for the DC-OPF clear (see _clear_market for why).
+_TIGHT = dict(tol_gap_abs=1e-11, tol_gap_rel=1e-11, tol_feas=1e-11)
+
 
 class ElectricityMarketEnv:
     """
@@ -202,7 +205,7 @@ class ElectricityMarketEnv:
 
         prob = cp.Problem(cp.Maximize(benefit - cost), constraints)
         try:
-            prob.solve(solver=cp.CLARABEL)
+            prob.solve(solver=cp.CLARABEL, **_TIGHT)
         except Exception:
             prob.solve()
 
@@ -324,7 +327,12 @@ class ElectricityMarketEnv:
         p0_now = self.P0 + self._demand_u
         self._p0_param.value = p0_now
         try:
-            self._prob.solve(solver=cp.CLARABEL, warm_start=True)
+            # Tight tolerances: with an inelastic load pocket the inverse-demand
+            # intercepts differ by an order of magnitude across nodes, and at
+            # CLARABEL's defaults that ill-conditioning leaves errors of ~1e-2 in
+            # the transmission shadow prices -- big enough to flip a line between
+            # "binding" and "not binding" in the congestion state.
+            self._prob.solve(solver=cp.CLARABEL, warm_start=True, **_TIGHT)
         except Exception:
             try:
                 self._prob.solve(warm_start=True)

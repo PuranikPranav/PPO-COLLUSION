@@ -24,6 +24,23 @@ number is the **stationary Δ** (last-half average) across seeds.
 | **High-H parity** | `MODE=parity HISTORY_LEN=8` | The strict 19×H observation vector with H>1, so the obs itself carries a multi-period window. Directly comparable to PPO at the same H. |
 | **Memoryless baseline** | `MODE=parity HISTORY_LEN=1` | The deliberately-crippled control: same state, one period back. Expected to stay near Nash. The treatment-vs-baseline contrast is itself a result. |
 
+**`MODE=all` (default) runs all three arms in one job** → `memory/`, `parity_h8/`,
+`parity_h1/` under the results base, each with its own figures, plus the combined
+paper table. Every session also writes `sessions/session_*/transcripts.jsonl` —
+the model's per-period `reasoning`/`strategy` text (grep it for the smoking-gun
+quotes; disable with `--no-transcripts`).
+
+### Comparability with the PPO runs
+
+- Metrics rows log **instantaneous per-period values** (no within-session
+  averaging); the plot layer averages **across sessions** per step — identical to
+  the PPO convention.
+- Every session's metrics start with the **t=0 competitive anchor row** (same as
+  `ppo.py`), so all figures begin at the competitive benchmark.
+- The limit-strategy LMP sweep is derived from the run's own benchmarks
+  (competitive→monopoly, padded), so it tracks whatever network parameters are in
+  `iso_market/node_network.py`.
+
 ### Punishment / impulse-response (the retaliation figure)
 
 After each session the driver runs `run_deviation_experiment_llm` (in `llm_dynamics.py`),
@@ -88,21 +105,81 @@ python llm_market/run_llm_market.py --backend mock \
    tail -f slurm-llm-*.out
    ```
 
-### Recommended publishable run (all three arms)
+## Recommended first submit (pilot → full)
+
+Granite is **frozen** — there is no training. Collusion (if any) emerges *in context*
+over repeated rounds. A short competitive warmup helps the Δ plot start cleanly; the
+real “trial phase” is just enough periods for a tacit resting point, then the
+**forced-deviation** test asks whether the rival punishes a cheat.
+
+**1. Pilot first** (memory treatment only, 3×80 rounds + deviation figure):
+```bash
+cd ~/ppo-collusion && git pull
+MODE=pilot sbatch -J llm-pilot run_gilbreth_llm.sh
+```
+Outputs: `results/llm_granite8/memory/`, `figures/llm_granite8/memory/`
+(deviation explainer PNGs + `sessions/*/transcripts.jsonl`).
+
+**2. Full paper package** once the pilot looks sane:
+```bash
+MODE=all SESSIONS=20 PERIODS=300 sbatch -J llm-granite8 run_gilbreth_llm.sh
+```
+
+**3. Optional unilateral-collusion probe** — answers “what happens if ONE agent
+colludes?” Firm 0 gets an explicitly collusive **price-leader** prompt
+(`collude`: restrain output, hold the price high, wait for the rival to match);
+firm 1 keeps the ordinary self-interested prompt, so anything firm 1 does in
+response — following the leader up, or free-riding on the high price — is
+**emergent, not instructed**:
+```bash
+MODE=pilot GOALS=collude,own_profit \
+  RESULTS_BASE=results/llm_granite8_asym FIGURES_BASE=figures/llm_granite8_asym \
+  sbatch -J llm-asym run_gilbreth_llm.sh
+```
+`GOALS=own_profit,joint_profit` is the softer variant (firm 1 told to maximize
+industry profit, no explicit leadership framing).
+
+**Trial phase (recommended):** add `GOALS_START=40` and both firms play the normal
+selfish prompt for the first 40 rounds, then firm 0’s collusion prompt switches on.
+The figures then show a within-session before/after contrast around the moment one
+agent starts colluding — cleaner causal evidence than comparing across runs:
+```bash
+MODE=pilot GOALS=collude,own_profit GOALS_START=40 PERIODS=160 \
+  RESULTS_BASE=results/llm_granite8_asym FIGURES_BASE=figures/llm_granite8_asym \
+  sbatch -J llm-asym run_gilbreth_llm.sh
+```
+What to read off this run: firm 1’s generation/profit after period 40 (does it
+restrain toward the leader → tacit collusion, or expand into the higher price →
+free-riding), the LMP path, and firm 1’s `reasoning` in
+`sessions/session_*/transcripts.jsonl` (does it *notice* the restraint?). The
+post-hoc deviation/limit probes run with the asymmetric goals fully active.
+
+### What to look at for collusion
+
+| Evidence | Where |
+|----------|--------|
+| Stationary Δ above Nash | Calvano Δ plot / `aggregate.json` |
+| Restraint in quantities / high LMP | gen + LMP figures |
+| Rival floods after a forced cheat | `--deviation-explainer` figures |
+| Model’s own words (“match rival”, “punish”) | `sessions/session_*/transcripts.jsonl` |
+
+### Recommended publishable run (all three arms, ONE submission)
 
 ```bash
-# 1. Collusion treatment: narrative memory + strategy note
-MODE=memory  SESSIONS=20 PERIODS=300 WINDOW=10 \
-    OUTPUT_DIR=results/llm_granite8/memory  sbatch -J llm-mem  run_gilbreth_llm.sh
-
-# 2. High-H parity (directly comparable to PPO at H=8)
-MODE=parity  HISTORY_LEN=8 SESSIONS=20 PERIODS=300 LIMIT_STRATEGY=1 \
-    OUTPUT_DIR=results/llm_granite8/parityH8 sbatch -J llm-h8  run_gilbreth_llm.sh
-
-# 3. Memoryless baseline (same state, one period back → expect ≈ Nash)
-MODE=parity  HISTORY_LEN=1 SESSIONS=20 PERIODS=300 \
-    OUTPUT_DIR=results/llm_granite8/parityH1 sbatch -J llm-h1  run_gilbreth_llm.sh
+# memory/ + parity_h8/ + parity_h1/ + figures + combined paper table:
+MODE=all SESSIONS=20 PERIODS=300 sbatch -J llm-granite8 run_gilbreth_llm.sh
 ```
+
+Or submit the arms as separate jobs (e.g. to parallelize across GPUs):
+
+```bash
+MODE=memory  SESSIONS=20 PERIODS=300 WINDOW=10  sbatch -J llm-mem run_gilbreth_llm.sh
+MODE=parity  HISTORY_LEN=8 SESSIONS=20 PERIODS=300 LIMIT_STRATEGY=1 \
+    sbatch -J llm-h8 run_gilbreth_llm.sh
+MODE=parity  HISTORY_LEN=1 SESSIONS=20 PERIODS=300 sbatch -J llm-h1 run_gilbreth_llm.sh
+```
+(When splitting into separate jobs, set a distinct `RESULTS_BASE`/`FIGURES_BASE`
+per job or the stale-results archiving will shuffle the previous arm away.)
 
 ### Model / hardware choices (set via env vars)
 
@@ -114,9 +191,11 @@ MODE=parity  HISTORY_LEN=1 SESSIONS=20 PERIODS=300 \
 The default is `ibm-granite/granite-3.3-8b-instruct` — a public, dense Granite model
 that is well-supported by vLLM 0.11 and fits on one A100-40GB at full (bf16) precision.
 
-Overridable env vars: `MODE`, `HISTORY_LEN`, `WINDOW`, `GOAL`, `SESSIONS`, `PERIODS`,
-`TEMPERATURE`, `MAXTOK`, `SEED`, `DEV_FRAC`, `DEV_WARMUP`, `DEV_HORIZON`, `DEV_SESSIONS`,
-`LIMIT_STRATEGY`, `OUTPUT_DIR`, `FIGURES_DIR`.
+Overridable env vars: `MODE` (pilot|memory|parity|both|all), `HISTORY_LEN`, `WINDOW`,
+`GOAL`, `GOALS` (optional per-firm, e.g. `collude,own_profit`), `GOALS_START`
+(period at which `GOALS` switches on; before that both play `GOAL`), `SESSIONS`,
+`PERIODS`, `WARMUP_COMP`, `TEMPERATURE`, `MAXTOK`, `SEED`, `DEV_FRAC`, `DEV_WARMUP`,
+`DEV_HORIZON`, `DEV_SESSIONS`, `LIMIT_STRATEGY`, `RESULTS_BASE`, `FIGURES_BASE`.
 
 > **Independent sessions:** each session now uses a distinct base seed threaded into the
 > engine sampler (`engine.chat(..., seed=...)`), so the cross-session error bars are real.

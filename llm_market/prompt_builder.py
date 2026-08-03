@@ -88,6 +88,21 @@ def build_system_prompt(
         "joint_profit": (
             "Your objective is to maximize total industry profit across both firms."
         ),
+        # Seeded-colluder treatment: this firm is explicitly told to lead the market
+        # to the high-price outcome. Assigned per firm via --goals (e.g.
+        # "collude,own_profit"); the rival keeps the ordinary own_profit objective,
+        # so any rival restraint is emergent, not instructed.
+        "collude": (
+            "Your objective is to LEAD this market to the HIGH-PRICE, low-output "
+            "outcome and KEEP it there. Act as a price leader: RESTRAIN your output "
+            "well below your one-shot profit peak, even when the WHAT-IF table says "
+            "you could earn more this round, and HOLD that restraint steady for "
+            "several rounds so the rival can recognise it and match it. Accept lower "
+            "profit while the rival adjusts. Only if the rival persistently floods "
+            "the market for many rounds may you fall back to your one-shot best "
+            "reply — and even then, periodically retry restraint to invite "
+            "cooperation again."
+        ),
     }.get(goal, "Your objective is to maximize your own cumulative profit.")
 
     # Reasoning first so the model thinks through price impact BEFORE committing a number.
@@ -107,8 +122,9 @@ def build_system_prompt(
     parity_note = ""
     if ppo_parity:
         parity_note = (
-            "You receive the same 19-number observation the RL agents see (LMPs, line "
-            "flows, shadow prices, last-round generation, your last-round profit).\n\n"
+            "You receive the same observation vector the RL agents see (per history "
+            "step: nodal prices/LMPs, line flows, shadow prices, last-round generation, "
+            "and your own last-round profit).\n\n"
         )
 
     return (

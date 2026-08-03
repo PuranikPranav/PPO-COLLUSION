@@ -1,0 +1,14 @@
+DISCOUNT-FACTOR SWEEP  (cell: imperfect_stochastic, deviator 0, high demand)
+--------------------------------------------------------------------------------------------------------
+  delta   Delta %   dev MW@t0  rival t+1  peak rival  periods>10%  area MW.per  cartel survives
+--------------------------------------------------------------------------------------------------------
+   0.99     79.36       17.41       6.18        6.18            3        12.30              83%
+   0.95     68.32       14.91       4.19        4.19            3         6.83              87%
+    0.9     63.62       13.29       2.57        2.57            2         3.61              88%
+    0.8     62.02       12.28       1.84        1.84            1         1.74              88%
+    0.7     62.81       11.77       1.03        1.03            1        -0.59              86%
+    0.5     64.93       11.59       0.76        0.76            1        -0.22              85%
+--------------------------------------------------------------------------------------------------------
+dev MW@t0   = the forced deviator's output above its no-deviation twin
+rival t+1   = the non-deviating firms' expansion one period later (the punishment)
+area        = total rival expansion summed over the post-deviation window

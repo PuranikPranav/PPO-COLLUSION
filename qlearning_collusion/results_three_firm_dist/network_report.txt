@@ -1,0 +1,76 @@
+================================================================================================
+TRANSMISSION CONGESTION ACROSS MARKET OUTCOMES  (market: three_firm_dist)
+================================================================================================
+line limits (MW): 1-2=36.0  2-3=45.0  3-1=38.0  3-4=16.0  4-5=12.0
+
+outcome                                      gen   avgLMP    profit   binding lines (rent $/MWh)
+------------------------------------------------------------------------------------------------
+perfect competition                        395.4    27.03    1831.0   2-3 (-2.24), 3-4 (+27.62)
+Nash-Cournot (LCP, paper eqs. 39-45)       207.6    58.13    8089.3   NONE
+Nash-Cournot (iterated best response)      306.6    41.83    6514.8   3-4 (+11.30)
+joint monopoly                             213.4    57.16    8168.6   NONE
+Nash on the action grid (Delta = 0)        306.6    41.83    6514.8   3-4 (+11.30)
+monopoly on the action grid (Delta = 1)    213.4    57.16    8168.6   NONE
+LEARNED COLLUSION (imperfect_stochastic)   261.5    49.25             1-2 (9% of periods, mean rent +0.38), 3-4 (88% of periods, mean rent +3.78)
+------------------------------------------------------------------------------------------------
+
+Per-line detail (flow / limit, utilisation, congestion rent):
+  perfect competition
+       1-2  flow   +32.85 /  36.0 MW  ( 91.3%)   rent   +0.000   slack
+       2-3  flow   -45.00 /  45.0 MW  (100.0%)   rent   -2.243   BINDING
+       3-1  flow   +12.15 /  38.0 MW  ( 32.0%)   rent   +0.000   slack
+       3-4  flow   +16.00 /  16.0 MW  (100.0%)   rent  +27.623   BINDING
+       4-5  flow   +10.36 /  12.0 MW  ( 86.3%)   rent   +0.000   slack
+  Nash-Cournot (LCP, paper eqs. 39-45)
+       1-2  flow    +8.83 /  36.0 MW  ( 24.5%)   rent   +0.000   slack
+       2-3  flow    -0.06 /  45.0 MW  (  0.1%)   rent   -0.000   slack
+       3-1  flow    -8.77 /  38.0 MW  ( 23.1%)   rent   -0.000   slack
+       3-4  flow   +15.04 /  16.0 MW  ( 94.0%)   rent   +0.000   slack
+       4-5  flow   +10.29 /  12.0 MW  ( 85.7%)   rent   +0.000   slack
+  Nash-Cournot (iterated best response)
+       1-2  flow   +31.89 /  36.0 MW  ( 88.6%)   rent   +0.000   slack
+       2-3  flow   -35.83 /  45.0 MW  ( 79.6%)   rent   -0.000   slack
+       3-1  flow    +3.94 /  38.0 MW  ( 10.4%)   rent   +0.000   slack
+       3-4  flow   +16.00 /  16.0 MW  (100.0%)   rent  +11.300   BINDING
+       4-5  flow   +10.36 /  12.0 MW  ( 86.3%)   rent   +0.000   slack
+  joint monopoly
+       1-2  flow   +24.21 /  36.0 MW  ( 67.3%)   rent   +0.000   slack
+       2-3  flow   -22.61 /  45.0 MW  ( 50.2%)   rent   -0.000   slack
+       3-1  flow    -1.61 /  38.0 MW  (  4.2%)   rent   -0.000   slack
+       3-4  flow   +15.21 /  16.0 MW  ( 95.0%)   rent   +0.000   slack
+       4-5  flow   +10.30 /  12.0 MW  ( 85.8%)   rent   +0.000   slack
+  Nash on the action grid (Delta = 0)
+       1-2  flow   +31.89 /  36.0 MW  ( 88.6%)   rent   +0.000   slack
+       2-3  flow   -35.83 /  45.0 MW  ( 79.6%)   rent   -0.000   slack
+       3-1  flow    +3.94 /  38.0 MW  ( 10.4%)   rent   +0.000   slack
+       3-4  flow   +16.00 /  16.0 MW  (100.0%)   rent  +11.300   BINDING
+       4-5  flow   +10.36 /  12.0 MW  ( 86.3%)   rent   +0.000   slack
+  monopoly on the action grid (Delta = 1)
+       1-2  flow   +24.21 /  36.0 MW  ( 67.3%)   rent   +0.000   slack
+       2-3  flow   -22.60 /  45.0 MW  ( 50.2%)   rent   -0.000   slack
+       3-1  flow    -1.62 /  38.0 MW  (  4.3%)   rent   -0.000   slack
+       3-4  flow   +15.21 /  16.0 MW  ( 95.0%)   rent   +0.000   slack
+       4-5  flow   +10.30 /  12.0 MW  ( 85.8%)   rent   +0.000   slack
+  LEARNED COLLUSION (imperfect_stochastic, 1000 converged sessions)
+       1-2  mean flow   +27.90 /  36.0 MW  ( 77.5%)   mean rent   +0.382   binds   8.6% of periods
+       2-3  mean flow   -30.97 /  45.0 MW  ( 68.8%)   mean rent   -0.000   binds   0.0% of periods
+       3-1  mean flow    +3.07 /  38.0 MW  (  8.1%)   mean rent   +0.000   binds   0.0% of periods
+       3-4  mean flow   +15.96 /  16.0 MW  ( 99.8%)   mean rent   +3.775   binds  87.9% of periods
+       4-5  mean flow   +10.36 /  12.0 MW  ( 86.3%)   mean rent   +0.000   binds   0.0% of periods
+
+Nodal LMPs ($/MWh) and demand (MW):
+  perfect competition                      LMP=[25.66, 26.41, 24.91, 52.54, 52.54]
+                                           d  =[97.74, 216.61, 65.09, 5.64, 10.36]
+  Nash-Cournot (LCP, paper eqs. 39-45)     LMP=[58.13, 58.13, 58.13, 58.13, 58.13]
+                                           d  =[44.26, 116.45, 31.87, 4.75, 10.29]
+  Nash-Cournot (iterated best response)    LMP=[41.24, 41.24, 41.24, 52.54, 52.54]
+                                           d  =[72.08, 169.78, 48.76, 5.64, 10.36]
+  joint monopoly                           LMP=[57.16, 57.16, 57.16, 57.16, 57.16]
+                                           d  =[45.86, 119.5, 32.84, 4.91, 10.3]
+  Nash on the action grid (Delta = 0)      LMP=[41.24, 41.24, 41.24, 52.54, 52.54]
+                                           d  =[72.08, 169.78, 48.76, 5.64, 10.36]
+  monopoly on the action grid (Delta = 1)  LMP=[57.16, 57.16, 57.16, 57.16, 57.16]
+                                           d  =[45.86, 119.5, 32.84, 4.91, 10.3]
+  LEARNED COLLUSION                        LMP=[48.85, 49.11, 48.98, 52.75, 52.75]
+                                           d  =[59.54, 144.93, 41.02, 5.61, 10.36]
+================================================================================================
