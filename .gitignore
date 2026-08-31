@@ -1,9 +1,14 @@
 __pycache__/
 venv/
 results/
+latest_results/
+old_results/
+figures/
+.DS_Store
 *.pt
 slurm-*.out
 slurm-*.err
+latest.out
 
 # Local installers (GitHub file-size limit)
 Miniconda*.sh

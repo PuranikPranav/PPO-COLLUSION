@@ -32,6 +32,8 @@ actions, δ=0.95, α=0.15, β=4e-6, 1000 sessions, convergence = greedy policy u
 ``convergence`` is measured in *PPO update* units (--convergence-patience), not env steps.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -40,11 +42,13 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+import torch.nn.functional as F
+from torch.distributions import Beta
 from scipy.optimize import root
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -153,19 +157,18 @@ class RolloutBuffer:
 
 
 # ======================================================================
-# Actor-Critic network
+# Actor-Critic network (Beta policy on [0, 1] generation fractions)
 # ======================================================================
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden: int = 64):
         super().__init__()
-        self.actor_mean = nn.Sequential(
+        self.actor_net = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
-            nn.Linear(hidden, act_dim),
+            nn.Linear(hidden, act_dim * 2),
         )
-        self.actor_log_std = nn.Parameter(torch.zeros(act_dim))
         self.critic = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
@@ -174,10 +177,45 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden, 1),
         )
 
+    def get_alpha_beta(self, obs):
+        raw_out = self.actor_net(obs)
+        alpha_logits, beta_logits = raw_out.chunk(2, dim=-1)
+        alpha = F.softplus(alpha_logits) + 1e-3
+        beta = F.softplus(beta_logits) + 1e-3
+        return alpha, beta
+
+    @torch.no_grad()
+    def init_policy_mean(self, target_fraction, concentration: float = 2.5,
+                         weight_scale: float = 0.3):
+        """Bias the actor so the *initial* Beta mean equals ``target_fraction`` per plant.
+
+        With a Beta(α, β) policy the mean is α/(α+β); we set α = m·c, β = (1−m)·c for the
+        target mean m and a (deliberately low) concentration c so the initial policy still
+        samples broadly across the action space. The final-layer weights are kept (scaled
+        by ``weight_scale``) so different seeds start with genuine spread *around* the
+        competitive baseline rather than all collapsing onto an identical point.
+        """
+        last = self.actor_net[-1]
+        act_dim = last.out_features // 2
+        m = np.clip(np.asarray(target_fraction, dtype=np.float64), 1e-3, 1.0 - 1e-3)
+        c = float(concentration)
+        alpha_t = np.clip(m * c, 1e-3 + 1e-6, None)
+        beta_t = np.clip((1.0 - m) * c, 1e-3 + 1e-6, None)
+
+        def softplus_inv(y):
+            # inverse of softplus: x s.t. softplus(x) = y  (y > 0)
+            return np.log(np.expm1(np.clip(y, 1e-6, None)))
+
+        b_alpha = softplus_inv(alpha_t - 1e-3)
+        b_beta = softplus_inv(beta_t - 1e-3)
+        bias = np.concatenate([b_alpha, b_beta]).astype(np.float32)
+
+        last.weight.mul_(weight_scale)
+        last.bias.copy_(torch.from_numpy(bias).to(last.bias.device))
+
     def policy(self, obs):
-        mean = self.actor_mean(obs)
-        std = self.actor_log_std.exp().expand_as(mean)
-        return Normal(mean, std)
+        alpha, beta = self.get_alpha_beta(obs)
+        return Beta(alpha, beta)
 
     def value(self, obs):
         return self.critic(obs).squeeze(-1)
@@ -208,30 +246,28 @@ class PPOAgent:
 
     @torch.no_grad()
     def select_action(self, obs_norm: np.ndarray):
-        """Sample stochastic action. Returns (raw, scaled_MW, log_prob, value)."""
+        """Sample stochastic action. Returns (fraction, scaled_MW, log_prob, value)."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         dist = self.ac.policy(obs_t)
-        raw = dist.sample().squeeze(0)
-        log_prob = dist.log_prob(raw).sum().item()
+        raw_fraction = dist.sample().squeeze(0)
+        safe_fraction = torch.clamp(raw_fraction, 1e-5, 1.0 - 1e-5)
+        log_prob = dist.log_prob(safe_fraction).sum().item()
         value = self.ac.value(obs_t).item()
-        raw_np = raw.cpu().numpy()
-        return raw_np, self._to_mw(raw_np), log_prob, value
+        frac_np = safe_fraction.cpu().numpy()
+        return frac_np, frac_np * self.caps, log_prob, value
 
     @torch.no_grad()
     def deterministic_action(self, obs_norm: np.ndarray) -> np.ndarray:
-        """Return the greedy (mean) action in MW — no exploration noise."""
+        """Greedy mean of Beta policy, scaled to MW."""
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
-        raw = self.ac.actor_mean(obs_t).squeeze(0).cpu().numpy()
-        return self._to_mw(raw)
+        alpha, beta = self.ac.get_alpha_beta(obs_t)
+        mean_fraction = (alpha / (alpha + beta)).squeeze(0).cpu().numpy()
+        return mean_fraction * self.caps
 
     @torch.no_grad()
     def get_value(self, obs_norm: np.ndarray) -> float:
         obs_t = torch.from_numpy(obs_norm).unsqueeze(0).to(self.device)
         return self.ac.value(obs_t).item()
-
-    def _to_mw(self, raw: np.ndarray) -> np.ndarray:
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        return frac * self.caps
 
     def update(self, last_val, gamma, gae_lambda, clip_eps, epochs,
                minibatch_size, ent_coef, vf_coef, max_grad_norm):
@@ -280,30 +316,29 @@ def compute_competitive_benchmark(env: ElectricityMarketEnv):
     from iso_market.node_network import P0, Q0
 
     P0f, Q0f = P0.astype(float), Q0.astype(float)
-    g1n1 = cp.Variable(nonneg=True)
-    g1n2 = cp.Variable(nonneg=True)
-    g2n2 = cp.Variable(nonneg=True)
+    g_vars = [cp.Variable(nonneg=True) for _ in PLANTS]
     d = cp.Variable(5, nonneg=True)
 
     benefit = cp.sum(cp.multiply(P0f, d) - 0.5 * cp.multiply(P0f / Q0f, cp.square(d)))
-    cost = (
-        PLANTS[0]["mc"] * g1n1 + 0.5 * PLANTS[0]["qc"] * g1n1 ** 2
-        + PLANTS[1]["mc"] * g1n2 + 0.5 * PLANTS[1]["qc"] * g1n2 ** 2
-        + PLANTS[2]["mc"] * g2n2 + 0.5 * PLANTS[2]["qc"] * g2n2 ** 2
+    cost = sum(
+        plant["mc"] * g_vars[pidx] + 0.5 * plant["qc"] * g_vars[pidx] ** 2
+        for pidx, plant in enumerate(PLANTS)
     )
-    y = cp.hstack([g1n1 - d[0], g1n2 + g2n2 - d[1], -d[2], -d[3], -d[4]])
+    gen_per_node = [0.0] * NUM_NODES
+    for pidx, plant in enumerate(PLANTS):
+        gen_per_node[plant["node"]] = gen_per_node[plant["node"]] + g_vars[pidx]
+    y = cp.hstack([gen_per_node[i] - d[i] for i in range(NUM_NODES)])
     constraints = [
         cp.sum(y) == 0,
         env.ptdf @ y <= env.line_limits,
         env.ptdf @ y >= -env.line_limits,
-        g1n1 <= 150, g1n2 <= 50, g2n2 <= 100,
-    ]
+    ] + [g_vars[pidx] <= plant["cap"] for pidx, plant in enumerate(PLANTS)]
     prob = cp.Problem(cp.Maximize(benefit - cost), constraints)
     prob.solve()
 
     lmps = P0f - (P0f / Q0f) * d.value
     avg_lmp = float(np.sum(lmps * d.value) / np.sum(d.value))
-    g_vals = [g1n1.value, g1n2.value, g2n2.value]
+    g_vals = [float(g.value) for g in g_vars]
 
     profits = {}
     for fid in range(NUM_FIRMS):
@@ -325,58 +360,108 @@ def compute_competitive_benchmark(env: ElectricityMarketEnv):
 
 
 def compute_monopoly_benchmark(env: ElectricityMarketEnv):
-    """Joint monopoly via CVXPY: maximize total revenue minus total cost.
+    """Joint monopoly via the wheeling-fee MPEC (matches m.mod / KNITRO on NEOS).
 
-    Mirrors `compute_competitive_benchmark` exactly except the objective:
-      - revenue at node i is the raw payment P_i * d_i (no 0.5 factor),
-        where P_i = P0_i - (P0_i / Q0_i) d_i, so revenue is concave in d.
-      - cost (quadratic, convex) is identical to the competitive case.
-    Nodal prices are recovered from the inverse demand curve at the optimum,
-    not from the balance-constraint dual (which is the system marginal price
-    for the welfare problem, not the monopolist's price).
+    The cartel maximizes aggregate GENERATION profit valued at the nodal price
+    (p_hub + w_i), subject to plant capacity, the inverse-demand market-clearing
+    link, and the exogenous ISO wheeling auction whose KKT conditions are embedded
+    as complementarity constraints. This is the same single-level MPCC solved by
+    `m.mod`; it is the formulation that yields the canonical ordering
+    Competitive < Nash < Monopoly on generation, LMP and profit. Solved here as a
+    Scholtes-relaxed MPCC with SLSQP multistart. Reference hub = last node
+    (w_N = 0, y_N = -sum_{spokes} y).
     """
-    import cvxpy as cp
+    from scipy.optimize import minimize
     from iso_market.node_network import P0, Q0
 
-    P0f, Q0f = P0.astype(float), Q0.astype(float)
-    g1n1 = cp.Variable(nonneg=True)
-    g1n2 = cp.Variable(nonneg=True)
-    g2n2 = cp.Variable(nonneg=True)
-    d = cp.Variable(5, nonneg=True)
+    p0 = P0.astype(float)
+    beta = p0 / Q0.astype(float)
+    ptdf = env.ptdf
+    line_lim = env.line_limits
+    L = env.num_lines
+    nP = len(PLANTS)
+    nS = NUM_NODES - 1                 # spokes (non-reference nodes)
+    Psp = ptdf[:, :nS]                 # PTDF restricted to spoke columns
+    plant_node = np.array([PLANTS[i]["node"] for i in range(nP)])
+    mc = np.array([PLANTS[i]["mc"] for i in range(nP)])
+    qc = np.array([PLANTS[i]["qc"] for i in range(nP)])
+    cap = np.array([PLANTS[i]["cap"] for i in range(nP)])
 
-    revenue = cp.sum(cp.multiply(P0f, d) - cp.multiply(P0f / Q0f, cp.square(d)))
-    cost = (
-        PLANTS[0]["mc"] * g1n1 + 0.5 * PLANTS[0]["qc"] * g1n1 ** 2
-        + PLANTS[1]["mc"] * g1n2 + 0.5 * PLANTS[1]["qc"] * g1n2 ** 2
-        + PLANTS[2]["mc"] * g2n2 + 0.5 * PLANTS[2]["qc"] * g2n2 ** 2
-    )
-    y = cp.hstack([g1n1 - d[0], g1n2 + g2n2 - d[1], -d[2], -d[3], -d[4]])
-    constraints = [
-        cp.sum(y) == 0,
-        env.ptdf @ y <= env.line_limits,
-        env.ptdf @ y >= -env.line_limits,
-        g1n1 <= 150, g1n2 <= 50, g2n2 <= 100,
-    ]
-    prob = cp.Problem(cp.Maximize(revenue - cost), constraints)
-    prob.solve()
+    def gen_per_node(g):
+        gn = np.zeros(NUM_NODES)
+        for k in range(nP):
+            gn[plant_node[k]] += g[k]
+        return gn
 
-    lmps = P0f - (P0f / Q0f) * d.value
-    avg_lmp = float(np.sum(lmps * d.value) / np.sum(d.value))
-    g_vals = [g1n1.value, g1n2.value, g2n2.value]
+    # decision vector z = [g(nP), y(nS), p_hub(1), w(nS), lam+(L), lam-(L)]
+    i_g = slice(0, nP)
+    i_y = slice(nP, nP + nS)
+    i_ph = nP + nS
+    i_w = slice(nP + nS + 1, nP + 2 * nS + 1)
+    i_lp = slice(nP + 2 * nS + 1, nP + 2 * nS + 1 + L)
+    i_lm = slice(nP + 2 * nS + 1 + L, nP + 2 * nS + 1 + 2 * L)
+    dim = nP + 2 * nS + 1 + 2 * L
+
+    def w_full(z):
+        return np.concatenate([z[i_w], [0.0]])          # w_N = 0
+    def y_full(z):
+        y = z[i_y]
+        return np.concatenate([y, [-np.sum(y)]])         # y_N = -sum y
+
+    def neg_profit(z):
+        lmp = z[i_ph] + w_full(z)
+        g = z[i_g]
+        return -(np.sum(lmp * gen_per_node(g)) - np.sum(mc * g + 0.5 * qc * g ** 2))
+
+    def eq_con(z):
+        mkt = p0 - beta * (gen_per_node(z[i_g]) + y_full(z)) - (z[i_ph] + w_full(z))
+        whl = z[i_w] - Psp.T @ (z[i_lp] - z[i_lm])
+        return np.concatenate([mkt, whl])
+
+    bounds = ([(0.0, cap[k]) for k in range(nP)]
+              + [(-300.0, 300.0)] * nS + [(0.0, 300.0)] + [(-100.0, 100.0)] * nS
+              + [(0.0, 1000.0)] * L + [(0.0, 1000.0)] * L)
+    rng = np.random.default_rng(0)
+    best_z, best_obj = None, -np.inf
+    for eps in (1e-1, 1e-3, 1e-5, 1e-7):
+        cons = [
+            {"type": "eq", "fun": eq_con},
+            {"type": "ineq", "fun": lambda z: line_lim - Psp @ z[i_y]},
+            {"type": "ineq", "fun": lambda z: line_lim + Psp @ z[i_y]},
+            {"type": "ineq", "fun": lambda z, e=eps: e - z[i_lp] * (line_lim - Psp @ z[i_y])},
+            {"type": "ineq", "fun": lambda z, e=eps: e - z[i_lm] * (line_lim + Psp @ z[i_y])},
+        ]
+        for attempt in range(35):
+            z0 = np.zeros(dim)
+            z0[i_g] = rng.uniform(0, cap)
+            z0[i_y] = rng.uniform(-50, 50, nS)
+            z0[i_ph] = rng.uniform(30, 46)
+            r = minimize(neg_profit, z0, method="SLSQP", bounds=bounds,
+                         constraints=cons, options={"maxiter": 800, "ftol": 1e-10})
+            if r.success and np.max(np.abs(eq_con(r.x))) < 1e-5 and -r.fun > best_obj:
+                best_obj, best_z = -r.fun, r.x.copy()
+    if best_z is None:
+        raise RuntimeError("Monopoly MPEC failed to converge.")
+
+    g = np.clip(best_z[i_g], 0.0, cap)
+    lmps = best_z[i_ph] + w_full(best_z)
+    demand = gen_per_node(g) + y_full(best_z)
+    avg_lmp = float(np.sum(lmps * demand) / np.sum(demand))
+    g_vals = [float(v) for v in g]
 
     profits = {}
     for fid in range(NUM_FIRMS):
         p = 0.0
         for pidx in FIRM_PLANT_IDX[fid]:
             plant = PLANTS[pidx]
-            g = g_vals[pidx]
-            p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g ** 2
+            gv = g_vals[pidx]
+            p += lmps[plant["node"]] * gv - plant["mc"] * gv - 0.5 * plant["qc"] * gv ** 2
         profits[fid] = p
 
     return {
         "avg_lmp": avg_lmp,
         "lmps": lmps.tolist(),
-        "gens": [float(g) for g in g_vals],
+        "gens": g_vals,
         "total_gen": float(sum(g_vals)),
         "total_profit": float(sum(profits.values())),
         "profits": {str(k): float(v) for k, v in profits.items()},
@@ -385,10 +470,20 @@ def compute_monopoly_benchmark(env: ElectricityMarketEnv):
 
 def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
     """
-    Nash–Cournot equilibrium: stacked KKT MCP (same as model.mod / NEOS PATH).
+    Nash–Cournot equilibrium: stacked KKT MCP (same as nc.mod / NEOS PATH).
 
     Firm stationarity + capacity complementarity; ISO dispatch equalities;
     transmission complementarity. Matches AMPL formulation in repo root.
+
+    Firm stationarity follows paper eq. (31): firm f maximizes
+    sum_i (p_hub + w_i) g_{f,i} - (MC g_{f,i} + 1/2 QC g_{f,i}^2) with the price
+    set by the inverse-demand / market-clearing identity
+    p_hub + w_i = P0_i - (P0_i/Q0_i)(g_{f,i} + G_{-f,i} + y_i), taking w, y and
+    rivals' output G_{-f} as given. Substituting the identity into the objective
+    and differentiating f's Lagrangian w.r.t. g_{f,i} gives the stationarity
+    0 <= g_{f,i} _|_ -(p_hub + w_i) + (P0_i/Q0_i) g_{f,i} + MC + QC g_{f,i}
+    + rho_{f,i} >= 0 (cross-node terms vanish: node j's identity does not
+    contain g_{f,i}).
     """
     from iso_market.node_network import P0, Q0
 
@@ -414,8 +509,19 @@ def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
     def fb(a, b):
         return a + b - np.sqrt(a * a + b * b + 1e-18)
 
+    # z = [g(nP), rho(nP), y(5), mu(1), lam+(5), lam-(5)]
+    nP = n_plants
+    i_y0, i_mu = 2 * nP, 2 * nP + NUM_NODES
+
     def unpack(z):
-        return z[0:3], z[3:6], z[6:11], z[11], z[12:17], z[17:22]
+        return (
+            z[0:nP],
+            z[nP:i_y0],
+            z[i_y0:i_mu],
+            z[i_mu],
+            z[i_mu + 1:i_mu + 6],
+            z[i_mu + 6:i_mu + 11],
+        )
 
     def mcp_residual(z):
         g, rho, y, mu, lp, lm = unpack(z)
@@ -436,8 +542,8 @@ def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
 
     best_z, best_res = None, np.inf
     base = np.concatenate([
-        np.array([100.0, 40.0, 40.0]),
-        np.zeros(3),
+        0.5 * plant_cap,
+        np.zeros(nP),
         np.zeros(5),
         np.array([28.0]),
         np.zeros(5),
@@ -447,12 +553,12 @@ def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
     for attempt in range(40):
         z0 = base.copy()
         if attempt:
-            z0[0:3] = rng.uniform(0, plant_cap)
-            z0[6:11] = rng.uniform(-20, 20, 5)
-            z0[11] = rng.uniform(15, 35)
+            z0[0:nP] = rng.uniform(0, plant_cap)
+            z0[i_y0:i_mu] = rng.uniform(-20, 20, 5)
+            z0[i_mu] = rng.uniform(15, 35)
         sol = root(mcp_residual, z0, method="hybr", tol=1e-12)
         res = float(np.max(np.abs(mcp_residual(sol.x))))
-        g = sol.x[0:3]
+        g = sol.x[0:nP]
         if np.all(g >= -1e-6) and np.all(g <= plant_cap + 1e-6) and res < best_res:
             best_res, best_z = res, sol.x.copy()
         if best_res < 1e-9:
@@ -492,6 +598,95 @@ def compute_cournot_nash_benchmark(env: ElectricityMarketEnv):
     }
 
 
+def compute_env_nash_benchmark(env: ElectricityMarketEnv, damping: float = 0.35,
+                               max_sweeps: int = 200, tol_mw: float = 0.05):
+    """
+    DIAGNOSTIC env-consistent Cournot–Nash: the fixed point of numerical best
+    responses through the ISO's ACTUAL DC-OPF re-clear (the game PPO agents
+    play). The Δ floor remains `compute_cournot_nash_benchmark` — the paper's
+    Nash–Cournot LCP (eqs. 39-45), in which each firm's stationarity uses its
+    OWN node's inverse-demand slope with the ISO's imports held fixed.
+
+    Purpose of this diagnostic: when the Nash point leaves a gen node
+    export-congested, the local-slope conjecture is physically accurate and
+    this BR fixed point coincides with the LCP Nash — confirming the paper's
+    benchmark is attainable inside the simulator. A large discrepancy warns
+    that the LCP floor may not be reachable by the learning agents (this is
+    what rules out sitings that leave one firm alone on a well-connected
+    node). Solved by damped Gauss–Seidel best-response iteration (concave 1-D
+    best responses via bounded scalar search); multistart verifies uniqueness;
+    `br_residual_mw` reports max |BR(g) - g|.
+    """
+    from scipy.optimize import minimize_scalar
+
+    caps = np.array([PLANTS[i]["cap"] for i in range(len(PLANTS))])
+    nodes = [PLANTS[i]["node"] for i in range(len(PLANTS))]
+    nP = len(PLANTS)
+
+    def clear(g):
+        gn = np.zeros(NUM_NODES)
+        for i, nd in enumerate(nodes):
+            gn[nd] += g[i]
+        return env._clear_market(gn)
+
+    def firm_profit(lmps, g, f):
+        p = PLANTS[f]
+        return lmps[p["node"]] * g[f] - p["mc"] * g[f] - 0.5 * p["qc"] * g[f] ** 2
+
+    def best_response(g, f):
+        def neg(x):
+            gt = g.copy()
+            gt[f] = x
+            lmps, _, _, _ = clear(gt)
+            return 1e9 if lmps is None else -firm_profit(lmps, gt, f)
+        r = minimize_scalar(neg, bounds=(0.0, caps[f]), method="bounded",
+                            options={"xatol": 0.02})
+        return float(r.x)
+
+    def solve_from(g0):
+        g = g0.copy()
+        for _ in range(max_sweeps):
+            moved = 0.0
+            for f in range(nP):
+                new = damping * g[f] + (1.0 - damping) * best_response(g, f)
+                moved = max(moved, abs(new - g[f]))
+                g[f] = new
+            if moved < tol_mw:
+                break
+        res = max(abs(best_response(g, f) - g[f]) for f in range(nP))
+        return g, res
+
+    best_g, best_res = None, np.inf
+    for g0 in (0.5 * caps, 0.8 * caps):
+        g, res = solve_from(g0)
+        if res < best_res:
+            best_g, best_res = g, res
+
+    g = np.clip(best_g, 0.0, caps)
+    lmps, demand, _, _ = clear(g)
+    avg_lmp = float(np.sum(lmps * demand) / np.sum(demand))
+    g_vals = [float(v) for v in g]
+
+    profits = {}
+    for fid in range(NUM_FIRMS):
+        p = 0.0
+        for pidx in FIRM_PLANT_IDX[fid]:
+            plant = PLANTS[pidx]
+            gv = g_vals[pidx]
+            p += lmps[plant["node"]] * gv - plant["mc"] * gv - 0.5 * plant["qc"] * gv ** 2
+        profits[fid] = p
+
+    return {
+        "avg_lmp": avg_lmp,
+        "lmps": np.asarray(lmps).tolist(),
+        "gens": g_vals,
+        "total_gen": float(sum(g_vals)),
+        "total_profit": float(sum(profits.values())),
+        "profits": {str(k): float(v) for k, v in profits.items()},
+        "br_residual_mw": float(best_res),
+    }
+
+
 def _benchmark_profits_by_firm(benchmarks: dict, key: str) -> dict:
     """Map firm id → profit ($/step) from a benchmark dict."""
     return {
@@ -522,6 +717,7 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     Mean deterministic-policy MW per firm over stored rollout observations (post-update
     actor mean on each row), and Δ from one DC-OPF clear at mean plant outputs.
     obs_by_firm[fid] is (T, obs_dim) numpy — typically a copy of the buffer before .clear().
+    Actions in the buffer are generation fractions in [0, 1] (Beta samples, clamped).
     """
     if not obs_by_firm:
         return None
@@ -535,9 +731,9 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
         obs_np = obs_by_firm[fid]
         obs = torch.from_numpy(obs_np.astype(np.float32)).to(agent.device)
         with torch.no_grad():
-            raw = agent.ac.actor_mean(obs).cpu().numpy()
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        mw = frac * agent.caps
+            alpha, beta = agent.ac.get_alpha_beta(obs)
+            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
+        mw = mean_fraction * agent.caps
         greedy_totals[fid] = float(np.mean(mw.sum(axis=1)))
         mean_mw = np.mean(mw, axis=0)
         for j, pidx in enumerate(FIRM_PLANT_IDX[fid]):
@@ -547,11 +743,12 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
     for pidx, plant in enumerate(PLANTS):
         gen_per_node[plant["node"]] += gen_per_plant[pidx]
 
-    lmps, _demand = env._clear_market(gen_per_node)
+    lmps, demand, _flows, _shadow = env._clear_market(gen_per_node)
     if lmps is None:
         return {
             "greedy_totals": greedy_totals,
             "greedy_delta_combined": float("nan"),
+            "greedy_avg_lmp": float("nan"),
         }
 
     profits = {}
@@ -563,8 +760,13 @@ def compute_greedy_metrics_from_obs(env, agents, obs_by_firm: dict, pi_nash, pi_
             p += lmps[plant["node"]] * g - plant["mc"] * g - 0.5 * plant["qc"] * g * g
         profits[fid] = p
 
+    avg_lmp = (
+        float(np.sum(lmps * demand) / np.sum(demand)) if np.sum(demand) > 0 else float("nan")
+    )
+
     return {
         "greedy_totals": greedy_totals,
+        "greedy_avg_lmp": avg_lmp,
         "greedy_delta_combined": float(
             compute_combined_delta(profits, pi_nash, pi_mono)
         ),
@@ -586,14 +788,14 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
         agent.ac.load_state_dict(old_sd_dev)
         with torch.no_grad():
             old_dist = agent.ac.policy(obs_buf)
-            old_mean = old_dist.loc.clone()
-            old_std = old_dist.scale.clone()
+            old_alpha = old_dist.concentration1.clone()
+            old_beta = old_dist.concentration0.clone()
     finally:
         agent.ac.load_state_dict(current_sd)
 
     with torch.no_grad():
         new_dist = agent.ac.policy(obs_buf)
-    old_fixed = Normal(old_mean, old_std)
+    old_fixed = Beta(old_alpha, old_beta)
     kl = torch.distributions.kl_divergence(old_fixed, new_dist)
     return float(kl.sum(dim=-1).mean().item())
 
@@ -601,112 +803,297 @@ def kl_checkpoint_vs_current_policy(agent, obs_buf: torch.Tensor, old_state_dict
 # ======================================================================
 # Post-training analysis
 # ======================================================================
+def _public_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
+    """Build one PUBLIC per-step vector; scale LMPs, keep competitive flows/shadows/gens."""
+    market = env._baseline_obs_vector.astype(np.float64)  # market-only slice (LMPs, flows, shadow)
+    comp_lmps = market[:NUM_NODES]
+    tail = market[NUM_NODES:]
+    comp_avg = float(np.mean(comp_lmps))
+    if comp_avg > 0:
+        scaled_lmps = comp_lmps * (target_avg_lmp / comp_avg)
+    else:
+        scaled_lmps = np.full(NUM_NODES, target_avg_lmp, dtype=np.float64)
+    scaled_market = np.concatenate([scaled_lmps, tail])
+    return env._assemble_public_vector(scaled_market, env._baseline_gens)
+
+
+# Back-compat alias for older callers.
+def _obs_vector_with_scaled_lmps(env, target_avg_lmp: float) -> np.ndarray:
+    return _public_vector_with_scaled_lmps(env, target_avg_lmp)
+
+
+def _per_firm_reference_obs(env, public_vec: np.ndarray, fid: int) -> np.ndarray:
+    """Assemble a firm-specific tiled observation from a single public per-step vector.
+
+    Appends the firm's competitive-baseline own-reward to each historical step when
+    ``include_prev_reward`` is enabled, then tiles ``history_len`` times.
+    """
+    if env.obs_mode == "price_own":
+        own_total = float(sum(env._baseline_gens[p] for p in FIRM_PLANT_IDX[fid]))
+        row = np.concatenate([public_vec, [own_total]])
+    elif env.include_prev_reward:
+        row = np.concatenate([public_vec, [env._baseline_firm_reward[fid]]])
+    else:
+        row = public_vec
+    return np.tile(row, env.history_len).astype(np.float32)
+
+
+def _benchmark_lmp_grid(benchmarks, num_points, pad_frac=0.15, fallback=(15.0, 38.0)):
+    """LMP sweep grid spanning the market's actual competitive→monopoly price range
+    (padded), derived from the run's own benchmarks so it never goes stale when the
+    network parameters change."""
+    vals = []
+    for key in ("competitive", "cournot_nash", "monopoly"):
+        v = (benchmarks or {}).get(key, {}).get("avg_lmp")
+        if v is not None and math.isfinite(float(v)):
+            vals.append(float(v))
+    if len(vals) >= 2:
+        lo, hi = min(vals), max(vals)
+        pad = max(pad_frac * (hi - lo), 2.0)
+        return np.linspace(max(1.0, lo - pad), hi + pad, num_points)
+    return np.linspace(fallback[0], fallback[1], num_points)
+
+
 def build_reference_obs(env, benchmarks, num_points=20):
-    """Grid of observations spanning plausible LMP range (limit-strategy sweep)."""
-    comp_lmps = np.array(benchmarks["competitive"]["lmps"])
-    comp_avg = np.mean(comp_lmps)
-    targets = np.linspace(15, 38, num_points)
-    ref_obs = []
-    for target in targets:
-        scaled = comp_lmps * (target / comp_avg) if comp_avg > 0 else np.full(NUM_NODES, target)
-        obs = np.tile(scaled, env.history_len).astype(np.float32)
-        ref_obs.append(obs)
-    return np.array(ref_obs)
+    """Grid of PUBLIC observations spanning plausible average LMP (limit-strategy sweep)."""
+    targets = _benchmark_lmp_grid(benchmarks, num_points)
+    return np.array([_public_vector_with_scaled_lmps(env, t) for t in targets])
 
 
-def evaluate_deterministic(agents, obs_normalizers, ref_obs):
-    """Evaluate each agent's deterministic (greedy) output on reference states."""
+def evaluate_deterministic(agents, obs_normalizers, env, ref_public):
+    """Evaluate each agent's deterministic (greedy) output on reference public states."""
     result = {}
     for fid, agent in agents.items():
-        normed = np.array([obs_normalizers[fid].normalize(o) for o in ref_obs])
+        normed = np.array([
+            obs_normalizers[fid].normalize(_per_firm_reference_obs(env, p, fid))
+            for p in ref_public
+        ])
         obs_t = torch.from_numpy(normed).to(agent.device)
         with torch.no_grad():
-            raw = agent.ac.actor_mean(obs_t).cpu().numpy()
-        frac = 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        result[fid] = frac * agent.caps
+            alpha, beta = agent.ac.get_alpha_beta(obs_t)
+            mean_fraction = (alpha / (alpha + beta)).cpu().numpy()
+        result[fid] = mean_fraction * agent.caps
     return result
 
 
-def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=50):
-    """Evaluate the converged deterministic policy across a range of LMP levels."""
-    comp_lmps = np.array(benchmarks["competitive"]["lmps"])
-    comp_avg = np.mean(comp_lmps)
-    lmp_grid = np.linspace(15, 38, num_points)
+def compute_limit_strategy(agents, obs_normalizers, env, benchmarks, num_points=50,
+                           own_anchor: Optional[dict] = None):
+    """Evaluate the converged deterministic policy across a range of LMP levels.
+
+    ONE curve PER FIRM (the firms are asymmetric — their reaction functions are
+    not interchangeable). In price_own mode the strategy is output(p, q_own); the
+    reported curve is its slice at ``own_anchor`` (each firm's LEARNED resting
+    output — computed by a deterministic warmup when not supplied), which is the
+    on-path slice around which punishment operates. Other modes ignore the anchor.
+    """
+    lmp_grid = _benchmark_lmp_grid(benchmarks, num_points)
+
+    if env.obs_mode == "price_own" and own_anchor is None:
+        # Deterministic warmup to the learned resting point (frozen mean demand
+        # so the anchor is not shock-contaminated).
+        env.freeze_demand(0.0)
+        obs = env.reset()
+        for _ in range(20):
+            acts = {
+                f: agents[f].deterministic_action(obs_normalizers[f].normalize(obs[f]))
+                for f in agents
+            }
+            obs, _, done, _ = env.step(acts)
+            if done:
+                obs = env.reset()
+        own_anchor = {
+            f: float(np.sum(
+                agents[f].deterministic_action(obs_normalizers[f].normalize(obs[f]))
+            ))
+            for f in agents
+        }
+        env.freeze_demand(None)
 
     strategies = {str(fid): [] for fid in range(NUM_FIRMS)}
     for target in lmp_grid:
-        scaled = comp_lmps * (target / comp_avg)
-        obs = np.tile(scaled, env.history_len).astype(np.float32)
+        public_vec = _public_vector_with_scaled_lmps(env, target)
         for fid, agent in agents.items():
+            obs = _per_firm_reference_obs(env, public_vec, fid)
+            if env.obs_mode == "price_own" and own_anchor is not None:
+                # Overwrite the own-output slot (last feature of each history row)
+                # with the learned resting anchor.
+                obs = obs.copy()
+                fps = env.features_per_step
+                for h in range(env.history_len):
+                    obs[(h + 1) * fps - 1] = own_anchor[fid]
             obs_norm = obs_normalizers[fid].normalize(obs)
             gen_mw = agent.deterministic_action(obs_norm)
             strategies[str(fid)].append(float(np.sum(gen_mw)))
 
-    return {"lmp_grid": lmp_grid.tolist(), "strategies": strategies}
+    return {
+        "lmp_grid": lmp_grid.tolist(),
+        "strategies": strategies,
+        "own_anchor": {str(k): float(v) for k, v in (own_anchor or {}).items()},
+    }
 
 
 def run_deviation_experiment(env, agents, obs_normalizers,
-                             deviation_frac=0.2, warmup=20, horizon=20):
+                             deviation_frac=0.2, warmup=20, horizon=20, pre=4,
+                             deviation_len=1):
     """
-    After convergence, force one firm to increase output by deviation_frac
-    for one step and observe the response — analogous to Calvano Fig 4.
+    The punishment / impulse-response experiment (Calvano Fig. 4 analogue) — this is
+    the experiment that reveals whether the learned equilibrium is sustained by a
+    reward-punishment (trigger) strategy, i.e. genuine tacit collusion.
+
+    Per deviating firm:
+      1. Warm up `warmup` steps with the learned deterministic policy -> resting point.
+      2. Record `pre` resting periods (so the figure shows a flat collusive baseline).
+      3. ONE deviation period: the deviator's output is forced to (1+deviation_frac)x.
+      4. `horizon` periods of normal deterministic play -> observe the RIVAL's reaction.
+
+    Reading the result (quantity competition):
+      - PUNISHMENT  = the rival RAISES output after the cheat (floods to crash the
+        price, hurting the deviator) and both then de-escalate back toward resting.
+        A rival that punishes is enforcing the collusive norm -> tacit collusion.
+      - ACCOMMODATION = the rival does NOT react; the deviation just decays. (No
+        trigger strategy was learned.)
+
+    NOTE on memory and punishment DURATION: one-period memory (H=1) does NOT cap the
+    punishment at one period. As in Calvano et al. (2020) and Calzolari et al. (2021),
+    H=1 is enough to DETECT a deviation (a low price / high rival output last period);
+    the punishment then sustains itself through the STATE dynamics -- the low price the
+    retaliation creates becomes next period's state and triggers continued but GRADUALLY
+    milder retaliation, so the price level itself acts as a "surrogate clock" and the
+    price war fades over several periods back to the collusive resting point. H=1 is the
+    canonical Calvano setup and is sufficient for multi-period punishment; H>1 only adds
+    state information (e.g. to tell a deviation from a demand shock). Whether the agents
+    learn this is emergent.
+
+    The returned per-deviator dict carries the full trace, the index of the deviation
+    period (`dev_index`), the resting levels, and a quantitative `punishment` summary.
     """
     results = {}
 
+    def det_actions(obs):
+        a = {}
+        for fid, agent in agents.items():
+            a[fid] = agent.deterministic_action(obs_normalizers[fid].normalize(obs[fid]))
+        return a
+
     for deviating_fid in range(NUM_FIRMS):
+        rival_fids = [f for f in range(NUM_FIRMS) if f != deviating_fid]
         obs = env.reset()
 
-        # Warm up with deterministic policies to reach the "resting point"
+        # 1. Warm up to the resting point.
         for _ in range(warmup):
-            actions = {}
-            for fid, agent in agents.items():
-                obs_norm = obs_normalizers[fid].normalize(obs[fid])
-                actions[fid] = agent.deterministic_action(obs_norm)
-            obs, _, done, _ = env.step(actions)
-            if done:
-                obs = env.reset()
+            obs, _, _done, _ = env.step(det_actions(obs))
 
-        # Record resting generation
-        resting = {}
-        for fid, agent in agents.items():
-            obs_norm = obs_normalizers[fid].normalize(obs[fid])
-            resting[fid] = agent.deterministic_action(obs_norm)
+        # Resting generation (reference levels).
+        resting = det_actions(obs)
 
         trace_gen = {str(fid): [] for fid in range(NUM_FIRMS)}
+        trace_profit = {str(fid): [] for fid in range(NUM_FIRMS)}
         trace_lmp = []
 
-        # --- Deviation step ---
-        actions = {}
-        for fid, agent in agents.items():
-            obs_norm = obs_normalizers[fid].normalize(obs[fid])
-            actions[fid] = agent.deterministic_action(obs_norm)
-        deviated = actions[deviating_fid] * (1 + deviation_frac)
-        for j, pidx in enumerate(FIRM_PLANT_IDX[deviating_fid]):
-            deviated[j] = min(deviated[j], PLANTS[pidx]["cap"])
-        actions[deviating_fid] = deviated
-
-        obs, _, done, info = env.step(actions)
-        for fid in range(NUM_FIRMS):
-            trace_gen[str(fid)].append(float(np.sum(actions[fid])))
-        trace_lmp.append(info.get("avg_lmp", 0))
-
-        # --- Post-deviation: both play deterministic ---
-        for _ in range(horizon):
-            if done:
-                obs = env.reset()
-            actions = {}
-            for fid, agent in agents.items():
-                obs_norm = obs_normalizers[fid].normalize(obs[fid])
-                actions[fid] = agent.deterministic_action(obs_norm)
-            obs, _, done, info = env.step(actions)
+        def record(actions, rewards, info):
             for fid in range(NUM_FIRMS):
                 trace_gen[str(fid)].append(float(np.sum(actions[fid])))
-            trace_lmp.append(info.get("avg_lmp", 0))
+                trace_profit[str(fid)].append(float(rewards.get(fid, 0.0)))
+            trace_lmp.append(float(info.get("avg_lmp", 0)))
+
+        # 2. Pre-deviation resting periods (recorded so the plot shows the baseline).
+        for _ in range(pre):
+            actions = det_actions(obs)
+            obs, rewards, done, info = env.step(actions)
+            if done and info.get("error"):
+                obs = env.reset()
+                continue
+            record(actions, rewards, info)
+
+        dev_index = len(trace_lmp)  # the deviation lands at this index in the trace
+
+        # 3. Deviation period(s): the deviator's output is forced up for
+        # `deviation_len` consecutive periods (rivals play their policies
+        # simultaneously throughout). A sustained cheat gives one-period-memory
+        # rivals a persistent off-path signal to react to.
+        for _ in range(max(1, int(deviation_len))):
+            actions = det_actions(obs)
+            deviated = actions[deviating_fid] * (1 + deviation_frac)
+            for j, pidx in enumerate(FIRM_PLANT_IDX[deviating_fid]):
+                deviated[j] = min(deviated[j], PLANTS[pidx]["cap"])
+            actions[deviating_fid] = deviated
+            obs, rewards, done, info = env.step(actions)
+            if done and info.get("error"):
+                obs = env.reset()
+            record(actions, rewards, info)
+
+        # 4. Post-deviation: both play their learned deterministic policy.
+        for _ in range(horizon):
+            actions = det_actions(obs)
+            obs, rewards, done, info = env.step(actions)
+            if done and info.get("error"):
+                obs = env.reset()
+                continue
+            record(actions, rewards, info)
+
+        # --- Quantitative punishment summary (the RIVALS' reaction to the cheat) ---
+        # With >2 firms the relevant retaliation signal is the COMBINED rival
+        # output (all non-deviators flooding together); per-rival details are kept
+        # so plots can show who did the punishing.
+        per_rival = {}
+        for rf in rival_fids:
+            rest = float(np.sum(resting[rf]))
+            post = np.asarray(trace_gen[str(rf)][dev_index + 1:], dtype=float)
+            max_post = float(post.max()) if post.size else rest
+            per_rival[str(rf)] = {
+                "resting_mw": rest,
+                "max_post_mw": max_post,
+                "output_increase_mw": max_post - rest,
+                "punished": bool(max_post - rest > max(1.0, 0.03 * rest)),
+            }
+        rivals_rest = float(sum(per_rival[str(rf)]["resting_mw"] for rf in rival_fids))
+        combined_post = np.sum(
+            [np.asarray(trace_gen[str(rf)][dev_index + 1:], dtype=float) for rf in rival_fids],
+            axis=0,
+        )
+        rivals_max_post = float(np.max(combined_post)) if np.size(combined_post) else rivals_rest
+        lmp_pre = float(np.mean(trace_lmp[:dev_index])) if dev_index else float(trace_lmp[0])
+        lmp_post = trace_lmp[dev_index:]
+        lmp_min_post = float(np.min(lmp_post)) if lmp_post else lmp_pre
+        increase = rivals_max_post - rivals_rest
+        punishment = {
+            "rival_fids": rival_fids,
+            "rival_resting_mw": rivals_rest,          # combined across rivals
+            "rival_max_post_mw": rivals_max_post,     # combined across rivals
+            "rival_output_increase_mw": increase,     # > 0 => rivals flood = punishment
+            "per_rival": per_rival,
+            "lmp_pre": lmp_pre,
+            "lmp_min_post": lmp_min_post,
+            "lmp_drop": lmp_pre - lmp_min_post,
+            # A retaliation if the rivals jointly raise output meaningfully above resting.
+            "punished": bool(increase > max(1.0, 0.03 * rivals_rest)),
+        }
+
+        # --- Profit-side summary: was the cheat gain wiped out? ---
+        dev_len = max(1, int(deviation_len))
+        dev_prof = np.asarray(trace_profit[str(deviating_fid)], dtype=float)
+        if dev_prof.size > dev_index:
+            prof_rest = float(np.mean(dev_prof[:dev_index])) if dev_index else float(dev_prof[0])
+            cheat_slice = dev_prof[dev_index:dev_index + dev_len]
+            prof_cheat = float(np.mean(cheat_slice)) if cheat_slice.size else prof_rest
+            post = dev_prof[dev_index + dev_len:]
+            prof_min_post = float(np.min(post)) if post.size else prof_rest
+            punishment.update({
+                "dev_profit_resting": prof_rest,
+                "dev_profit_at_cheat": prof_cheat,          # cheat-period mean; gain if > resting
+                "dev_profit_min_post": prof_min_post,       # punishment bite if < resting
+                "dev_cheat_gain": prof_cheat - prof_rest,
+                "dev_punishment_loss": prof_rest - prof_min_post,
+            })
 
         results[str(deviating_fid)] = {
             "resting": {str(fid): float(np.sum(resting[fid])) for fid in range(NUM_FIRMS)},
             "gen": trace_gen,
+            "profit": trace_profit,
             "lmp": trace_lmp,
+            "dev_index": dev_index,
+            "deviation_len": dev_len,
+            "punishment": punishment,
         }
 
     return results
@@ -726,7 +1113,9 @@ def _print_paper_vs_ppo_banner():
 
 
 def _print_session_convergence_banner(args, session_id: int):
-    use = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    use = args.convergence_patience > 0 and args.convergence_mode in (
+        "delta", "kl", "strategy",
+    )
     print(
         "\n--- Convergence / logging ---\n"
         f"  convergence_mode={args.convergence_mode}\n"
@@ -734,8 +1123,10 @@ def _print_session_convergence_banner(args, session_id: int):
         f"(patience={args.convergence_patience} PPO updates; ignored when mode=none)\n"
         f"  delta_convergence_threshold={args.delta_convergence_threshold}\n"
         f"  kl_threshold={args.kl_threshold}  policy_kl_lag={args.policy_kl_lag}\n"
+        f"  strategy_tol_mw={args.strategy_tol_mw}\n"
         "  streak counts consecutive PPO updates satisfying the *active* mode only "
-        "(delta: |Δ_comb−Δ_comb,prev|; kl: max_f KL per --policy-kl-lag). "
+        "(delta: |Δ_comb−Δ_comb,prev|; kl: max_f KL per --policy-kl-lag; "
+        "strategy: max probe-output move < strategy_tol_mw). "
         "Printed KL is for monitoring in all modes.\n"
         "---\n"
     )
@@ -766,13 +1157,15 @@ def _print_progress_line(
     if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
         kl_extra = f" KL_lag{args.policy_kl_lag}={mkl:.2e}"
 
-    use_conv = args.convergence_patience > 0 and args.convergence_mode in ("delta", "kl")
+    use_conv = args.convergence_patience > 0 and args.convergence_mode in (
+        "delta", "kl", "strategy",
+    )
     if args.log_format == "legacy":
         print(
             f"{sess_prefix}[{total_steps:>8d}] ep {episode_count:>4d} | "
             f"LMP ${row['avg_lmp']:.2f} | "
             f"Δ_comb={d_comb:.3f} | "
-            f"g0={row['firm_0_avg_gen']:.1f} g1={row['firm_1_avg_gen']:.1f} | "
+            + " ".join(f"g{f}={row[f'firm_{f}_avg_gen']:.1f}" for f in range(NUM_FIRMS)) + " | "
             f"KL={mk:.2e}{kl_extra} streak={stable_count}"
             + (f"  [streak=active:{args.convergence_mode}]" if use_conv else "")
         )
@@ -783,7 +1176,7 @@ def _print_progress_line(
     elif args.convergence_mode == "none":
         sm = "none"
     else:
-        sm = "inactive"  # delta/kl but patience=0
+        sm = "inactive"  # mode set but patience=0
     dj = delta_max_jump if math.isfinite(delta_max_jump) else float("nan")
     kc = kl_for_convergence if math.isfinite(kl_for_convergence) else float("nan")
     parts = [
@@ -797,14 +1190,16 @@ def _print_progress_line(
         f"ep={episode_count}",
         f"LMP={row['avg_lmp']:.2f}",
         f"Δ_comb={d_comb:.3f}" if math.isfinite(d_comb) else "Δ_comb=NA",
-        f"g0={row['firm_0_avg_gen']:.1f}",
-        f"g1={row['firm_1_avg_gen']:.1f}",
+        *[f"g{f}={row[f'firm_{f}_avg_gen']:.1f}" for f in range(NUM_FIRMS)],
         f"KL_intra_max={mk:.2e}",
     ]
     if args.policy_kl_lag > 0 and mkl is not None and math.isfinite(mkl):
         parts.append(f"KL_lag_k={mkl:.2e}")
     parts.append(f"d_jump={dj:.4g}" if math.isfinite(dj) else "d_jump=NA")
     parts.append(f"kl_for_conv={kc:.4g}" if math.isfinite(kc) else "kl_for_conv=NA")
+    smv = row.get("strategy_move_mw", float("nan"))
+    if isinstance(smv, float) and math.isfinite(smv):
+        parts.append(f"strat_move={smv:.2f}MW")
     parts.append(f"streak_metric={sm}")
     if use_conv:
         parts.append(f"streak={stable_count}/{args.convergence_patience}")
@@ -825,6 +1220,7 @@ def train_session(env, benchmarks, args, session_id, device):
     pi_mono = _benchmark_profits_by_firm(benchmarks, "monopoly")
 
     # Fresh agents
+    comp_gens = benchmarks["competitive"]["gens"]
     agents = {}
     obs_normalizers = {}
     for fid in range(NUM_FIRMS):
@@ -834,39 +1230,115 @@ def train_session(env, benchmarks, args, session_id, device):
             caps=caps, hidden=args.hidden_dim, lr=args.lr,
             rollout_len=args.rollout_len, device=device,
         )
+        # Seed the policy mean. "competitive" pins it at the MAX-output ceiling, so the
+        # trajectory can only descend (no upward exploration). "neutral" seeds it at an
+        # interior fraction so agents explore both directions before settling.
+        if args.init_policy in ("competitive", "neutral"):
+            if args.init_policy == "competitive":
+                target_frac = np.array(
+                    [comp_gens[pidx] / PLANTS[pidx]["cap"] for pidx in FIRM_PLANT_IDX[fid]]
+                )
+            else:  # neutral: interior start, two-sided exploration
+                target_frac = np.full(len(FIRM_PLANT_IDX[fid]), args.init_fraction)
+            agents[fid].ac.init_policy_mean(
+                target_frac,
+                concentration=args.init_concentration,
+                weight_scale=args.init_weight_scale,
+            )
         obs_normalizers[fid] = RunningNormalizer(env.obs_dim)
 
-    # Early stopping: Δ-stability, policy KL, or none (--convergence-mode)
+    # Early stopping: Δ-stability, policy KL, limit-strategy stability, or none
     use_convergence = args.convergence_patience > 0 and args.convergence_mode in (
         "delta",
         "kl",
+        "strategy",
     )
     conv_delta = args.convergence_mode == "delta"
     conv_kl = args.convergence_mode == "kl"
+    conv_strategy = args.convergence_mode == "strategy"
     stable_count = 0
     last_delta_max_jump = float("nan")
     last_kl_for_convergence = float("nan")
+    last_strategy_move = float("nan")
     last_agent_kls = {fid: 0.0 for fid in range(NUM_FIRMS)}
     last_agent_kls_lag = {fid: float("nan") for fid in range(NUM_FIRMS)}
     policy_ckpt_hist = {fid: [] for fid in agents}
     prev_delta_combined = None
+    prev_probe_outputs = None
+
+    # STRATEGY mode: the PPO analogue of the paper's "greedy strategy unchanged
+    # for 100k periods" — probe the DETERMINISTIC policy on a FIXED grid of
+    # price-states (the same states the Fig-3 limit strategy is computed on,
+    # including off-path low prices where the punishment slope lives) and stop
+    # only when the probed outputs stop moving. Deterministic probes are immune
+    # to demand-shock noise; Δ-mode sees only on-path profits.
+    strategy_probe_public = None
+    if conv_strategy:
+        _targets = _benchmark_lmp_grid(benchmarks, num_points=20)
+        strategy_probe_public = [
+            _public_vector_with_scaled_lmps(env, t) for t in _targets
+        ]
 
     # Logging
     log_rows = []
+    record_samples = getattr(args, "record_samples", False)
+    sample_x = []
+    sample_y = {f: [] for f in range(NUM_FIRMS)}
+    sample_ent = []
     obs = env.reset()
     total_steps = 0
-    ep_rewards = {f: 0.0 for f in range(NUM_FIRMS)}
     episode_count = 0
     converged = False
 
-    recent_lmps = deque(maxlen=2000)
-    recent_profits = {f: deque(maxlen=200) for f in range(NUM_FIRMS)}
-    recent_gens = {f: deque(maxlen=2000) for f in range(NUM_FIRMS)}
+    smoothing_steps = 200 * args.episode_len if args.episode_len > 0 else 33600
+    # LMP / generation are smoothed over the *current rollout only* so each logged point
+    # reflects recent behavior. This is what surfaces the wide initial spread (and its
+    # narrowing over training) across sessions — a 2000-step window washed it out before.
+    recent_lmps = deque(maxlen=args.rollout_len)
+    recent_step_profits = {f: deque(maxlen=smoothing_steps) for f in range(NUM_FIRMS)}
+    recent_gens = {f: deque(maxlen=args.rollout_len) for f in range(NUM_FIRMS)}
+    # Rollout-scoped per-step profit (same window as recent_gens) so the profit figure
+    # can show the within-rollout sampled spread (the exploration envelope), exactly
+    # like the generation and LMP plots.
+    recent_rollout_profits = {f: deque(maxlen=args.rollout_len) for f in range(NUM_FIRMS)}
 
     num_updates = args.total_timesteps // args.rollout_len
     wall_start = time.time()
 
     _print_session_convergence_banner(args, session_id)
+
+    # ---------- t=0 anchor: the COMPETITIVE benchmark ----------
+    # The plotted trajectory STARTS at the competitive generation / price / profit —
+    # the economically natural starting point (the market the agents are "born into",
+    # which is also what the observation history is seeded with). Every subsequent
+    # logged point is what the LEARNED policy chooses, so the figures read:
+    #   t=0  -> competitive quantities,   t>=1 -> whatever the policy chooses.
+    comp_b = benchmarks["competitive"]
+    comp_profits = {fid: float(comp_b["profits"][str(fid)]) for fid in range(NUM_FIRMS)}
+    comp_delta = compute_combined_delta(comp_profits, pi_nash, pi_mono)
+    init_row = {
+        "step": 0,
+        "episodes": 0,
+        "wall_sec": 0.0,
+        "ppo_update": 0,
+        "ppo_updates_total": num_updates,
+        "convergence_mode": args.convergence_mode,
+        "early_stop_active": use_convergence,
+        "avg_lmp": float(comp_b["avg_lmp"]),
+        # No within-rollout spread at the competitive anchor: the band starts as a point.
+        "lmp_lo": float(comp_b["avg_lmp"]),
+        "lmp_hi": float(comp_b["avg_lmp"]),
+        "lmp_std": 0.0,
+        "delta_combined": float(comp_delta),
+    }
+    for fid in range(NUM_FIRMS):
+        g = float(sum(comp_b["gens"][pidx] for pidx in FIRM_PLANT_IDX[fid]))
+        init_row[f"firm_{fid}_avg_gen"] = g
+        init_row[f"firm_{fid}_avg_step_profit"] = comp_profits[fid]
+        init_row[f"firm_{fid}_profit_lo"] = comp_profits[fid]
+        init_row[f"firm_{fid}_profit_hi"] = comp_profits[fid]
+        init_row[f"firm_{fid}_profit_std"] = 0.0
+    log_rows.append(init_row)
 
     for update in range(num_updates):
         # ---------- collect rollout ----------
@@ -886,7 +1358,8 @@ def train_session(env, benchmarks, args, session_id, device):
             for fid, agent in agents.items():
                 o, a, lp, v = pending[fid]
                 agent.buffer.store(o, a, lp, rewards[fid], v, done)
-                ep_rewards[fid] += rewards[fid]
+                recent_step_profits[fid].append(rewards[fid])
+                recent_rollout_profits[fid].append(rewards[fid])
 
             if "lmps" in info:
                 recent_lmps.append(info["avg_lmp"])
@@ -896,14 +1369,19 @@ def train_session(env, benchmarks, args, session_id, device):
                     )
                     recent_gens[fid].append(gen_total)
 
+            if record_samples:
+                sample_x.append(total_steps)
+                for fid in range(NUM_FIRMS):
+                    sample_y[fid].append(float(np.sum(actions_mw[fid])))
+                sample_ent.append(ent_now if "ent_now" in dir() else float("nan"))
+
             obs = obs_next
             total_steps += 1
 
-            if done:
-                for fid in range(NUM_FIRMS):
-                    recent_profits[fid].append(ep_rewards[fid])
-                    ep_rewards[fid] = 0.0
+            if args.episode_len > 0 and total_steps % args.episode_len == 0:
                 episode_count += 1
+
+            if done:
                 obs = env.reset()
 
         # ---------- snapshot policies before update (KL metrics + optional convergence) ----------
@@ -916,15 +1394,30 @@ def train_session(env, benchmarks, args, session_id, device):
                 old_dist = agent.ac.policy(obs_buf)
                 old_policy_snapshots[fid] = {
                     "obs": obs_buf,
-                    "mean": old_dist.loc.clone(),
-                    "std": old_dist.scale.clone(),
+                    "alpha": old_dist.concentration1.clone(),
+                    "beta": old_dist.concentration0.clone(),
                 }
 
-        # Rollout obs for greedy metrics (post-update policy mean on same states)
-        rollout_obs_backup = {
-            fid: agent.buffer.obs[: agent.buffer.ptr].copy()
-            for fid, agent in agents.items()
-        }
+        # ---------- exploration schedule: explore early, exploit late ----------
+        # The Beta concentration is LEARNED (the policy naturally sharpens as it gets
+        # confident), but a FIXED entropy bonus fights that. Linearly anneal the entropy
+        # coefficient (and optionally the learning rate) from start -> final across
+        # training, so the agents sample broadly at first and increasingly exploit the
+        # learned policy as timesteps accumulate.
+        frac = update / max(1, num_updates - 1)
+        ent_final = args.ent_coef if args.ent_coef_final is None else args.ent_coef_final
+        ent_now = float(args.ent_coef + (ent_final - args.ent_coef) * frac)
+        if args.anneal_lr:
+            # Anneal to --lr-final (an LR FLOOR) when set, else to 0. With a
+            # floor, late-stage convergence must be EARNED under continued
+            # meaningful updates rather than scheduled by a vanishing LR.
+            lr_final = float(args.lr_final) if args.lr_final is not None else 0.0
+            lr_now = float(args.lr + (lr_final - args.lr) * frac)
+            for agent in agents.values():
+                for pg in agent.optimizer.param_groups:
+                    pg["lr"] = lr_now
+        else:
+            lr_now = float(args.lr)
 
         # ---------- PPO update ----------
         for fid, agent in agents.items():
@@ -933,7 +1426,7 @@ def train_session(env, benchmarks, args, session_id, device):
             agent.update(
                 last_val=last_val, gamma=args.gamma, gae_lambda=args.gae_lambda,
                 clip_eps=args.clip_eps, epochs=args.ppo_epochs,
-                minibatch_size=args.minibatch_size, ent_coef=args.ent_coef,
+                minibatch_size=args.minibatch_size, ent_coef=ent_now,
                 vf_coef=args.vf_coef, max_grad_norm=args.max_grad_norm,
             )
 
@@ -942,7 +1435,7 @@ def train_session(env, benchmarks, args, session_id, device):
             with torch.no_grad():
                 snap = old_policy_snapshots[fid]
                 new_dist = agents[fid].ac.policy(snap["obs"])
-                old_dist = Normal(snap["mean"], snap["std"])
+                old_dist = Beta(snap["alpha"], snap["beta"])
                 kl = torch.distributions.kl_divergence(old_dist, new_dist)
                 last_agent_kls[fid] = kl.sum(dim=-1).mean().item()
 
@@ -999,9 +1492,10 @@ def train_session(env, benchmarks, args, session_id, device):
         # Combined Δ and jump (logged every mode; streak only in delta mode)
         avg_step_profits = {}
         for fid in range(NUM_FIRMS):
-            ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0.0
             avg_step_profits[fid] = (
-                ep_prof / args.episode_len if args.episode_len > 0 else 0.0
+                float(np.mean(recent_step_profits[fid]))
+                if recent_step_profits[fid]
+                else 0.0
             )
         delta_combined_now = compute_combined_delta(
             avg_step_profits, pi_nash, pi_mono
@@ -1023,33 +1517,99 @@ def train_session(env, benchmarks, args, session_id, device):
 
         prev_delta_combined = delta_combined_now
 
+        # ---------- limit-strategy stability (strategy mode) ----------
+        if conv_strategy:
+            cur_probe = {}
+            for fid, agent in agents.items():
+                outs = np.empty(len(strategy_probe_public), dtype=np.float64)
+                for i, pv in enumerate(strategy_probe_public):
+                    o = _per_firm_reference_obs(env, pv, fid)
+                    outs[i] = float(np.sum(
+                        agent.deterministic_action(obs_normalizers[fid].normalize(o))
+                    ))
+                cur_probe[fid] = outs
+            if prev_probe_outputs is not None:
+                last_strategy_move = float(max(
+                    np.max(np.abs(cur_probe[f] - prev_probe_outputs[f]))
+                    for f in cur_probe
+                ))
+                if use_convergence:
+                    if last_strategy_move < args.strategy_tol_mw:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                    if stable_count >= args.convergence_patience:
+                        converged = True
+            prev_probe_outputs = cur_probe
+
         # ---------- logging ----------
-        if (update + 1) % args.log_interval == 0:
-            avg_lmp = np.mean(recent_lmps) if recent_lmps else 0
-            gr = compute_greedy_metrics_from_obs(
-                env, agents, rollout_obs_backup, pi_nash, pi_mono
-            )
+        # A metrics row is recorded EVERY update (so the plotted solid lines are
+        # near-continuous even on 2M-step sessions); --log-interval only throttles
+        # the console progress line.
+        is_last_update = update == num_updates - 1
+        print_now = (
+            update < args.log_interval
+            or (update + 1) % args.log_interval == 0
+            or is_last_update
+        )
+        if True:
+            # ---- SOLID-LINE quantities: the INSTANTANEOUS realized value at this logged
+            # step (the most recent env step of the rollout). NO within-session time
+            # averaging is applied here — the only averaging happens later, ACROSS the
+            # independent sessions, in the plot layer (aggregate_metric). The lo/hi/std
+            # keys below remain the within-rollout sampled envelope, kept ONLY as the
+            # shading context on the figures (not the plotted center line).
+            inst_lmp = float(recent_lmps[-1]) if recent_lmps else 0.0
+            lmp_std = float(np.std(recent_lmps)) if recent_lmps else 0.0
+            lmp_lo = float(np.min(recent_lmps)) if recent_lmps else inst_lmp
+            lmp_hi = float(np.max(recent_lmps)) if recent_lmps else inst_lmp
+            # Instantaneous per-firm profit -> instantaneous combined Δ for the plot.
+            # (delta_combined_now, the profit-window–smoothed Δ, is retained separately and
+            # used ONLY for the convergence criterion, never as a plotted value.)
+            inst_profits = {
+                f: (float(recent_rollout_profits[f][-1]) if recent_rollout_profits[f] else 0.0)
+                for f in range(NUM_FIRMS)
+            }
+            inst_delta = compute_combined_delta(inst_profits, pi_nash, pi_mono)
             row = {
                 "step": total_steps,
                 "episodes": episode_count,
-                "avg_lmp": float(avg_lmp),
+                "avg_lmp": inst_lmp,
+                "lmp_lo": lmp_lo,
+                "lmp_hi": lmp_hi,
+                "lmp_std": lmp_std,
                 "wall_sec": time.time() - wall_start,
-                "delta_combined": float(delta_combined_now),
+                "delta_combined": float(inst_delta),
+                "delta_combined_smoothed": float(delta_combined_now),
+                "ent_coef_now": ent_now,
+                "lr_now": lr_now,
             }
             for fid in range(NUM_FIRMS):
-                ep_prof = float(np.mean(recent_profits[fid])) if recent_profits[fid] else 0
-                avg_gen = float(np.mean(recent_gens[fid])) if recent_gens[fid] else 0
-                avg_step_prof = ep_prof / args.episode_len if args.episode_len > 0 else 0
-                row[f"firm_{fid}_ep_profit"] = ep_prof
-                row[f"firm_{fid}_avg_step_profit"] = float(avg_step_prof)
-                row[f"firm_{fid}_avg_gen"] = avg_gen
+                inst_prof = inst_profits[fid]
+                # Instantaneous realized generation at this step (no within-session mean).
+                inst_gen = float(recent_gens[fid][-1]) if recent_gens[fid] else 0.0
+                # Within-rollout spread of the SAMPLED generation = the exploration width
+                # (how widely the agent tried different outputs this rollout) — shading only.
+                gen_std = float(np.std(recent_gens[fid])) if recent_gens[fid] else 0.0
+                gen_lo = float(np.min(recent_gens[fid])) if recent_gens[fid] else inst_gen
+                gen_hi = float(np.max(recent_gens[fid])) if recent_gens[fid] else inst_gen
+                # Within-rollout sampled profit spread (the profit-side exploration band).
+                rp = recent_rollout_profits[fid]
+                prof_std = float(np.std(rp)) if rp else 0.0
+                prof_lo = float(np.min(rp)) if rp else inst_prof
+                prof_hi = float(np.max(rp)) if rp else inst_prof
+                row[f"firm_{fid}_ep_profit"] = inst_prof * args.episode_len
+                row[f"firm_{fid}_avg_step_profit"] = inst_prof
+                row[f"firm_{fid}_profit_std"] = prof_std
+                row[f"firm_{fid}_profit_lo"] = prof_lo
+                row[f"firm_{fid}_profit_hi"] = prof_hi
+                row[f"firm_{fid}_avg_gen"] = inst_gen
+                row[f"firm_{fid}_gen_std"] = gen_std
+                row[f"firm_{fid}_gen_lo"] = gen_lo
+                row[f"firm_{fid}_gen_hi"] = gen_hi
                 row[f"firm_{fid}_kl"] = last_agent_kls.get(fid, 0)
                 if args.policy_kl_lag > 0:
                     row[f"firm_{fid}_kl_lag"] = last_agent_kls_lag.get(fid, float("nan"))
-                if gr is not None:
-                    row[f"firm_{fid}_greedy_gen"] = gr["greedy_totals"][fid]
-            if gr is not None:
-                row["greedy_delta_combined"] = gr["greedy_delta_combined"]
             row["max_kl"] = max(last_agent_kls.values())
             if args.policy_kl_lag > 0:
                 fin_lag = [
@@ -1063,25 +1623,27 @@ def train_session(env, benchmarks, args, session_id, device):
             row["delta_combined_jump"] = float(last_delta_max_jump)
             row["delta_max_jump"] = float(last_delta_max_jump)
             row["kl_for_convergence"] = float(last_kl_for_convergence)
+            row["strategy_move_mw"] = float(last_strategy_move)
             row["ppo_update"] = update + 1
             row["ppo_updates_total"] = num_updates
             row["convergence_mode"] = args.convergence_mode
             row["early_stop_active"] = use_convergence
             log_rows.append(row)
 
-            _print_progress_line(
-                args,
-                session_id,
-                args.num_sessions,
-                total_steps,
-                episode_count,
-                update,
-                num_updates,
-                row,
-                stable_count,
-                last_delta_max_jump,
-                last_kl_for_convergence,
-            )
+            if print_now:
+                _print_progress_line(
+                    args,
+                    session_id,
+                    args.num_sessions,
+                    total_steps,
+                    episode_count,
+                    update,
+                    num_updates,
+                    row,
+                    stable_count,
+                    last_delta_max_jump,
+                    last_kl_for_convergence,
+                )
 
         if converged:
             sess_prefix = (
@@ -1100,6 +1662,11 @@ def train_session(env, benchmarks, args, session_id, device):
                         f"KL(intra-update) < {args.kl_threshold} "
                         f"for {args.convergence_patience} consecutive updates"
                     )
+            elif conv_strategy:
+                msg = (
+                    f"limit strategy moved < {args.strategy_tol_mw} MW on the "
+                    f"probe grid for {args.convergence_patience} consecutive updates"
+                )
             else:
                 msg = (
                     f"|Δ_comb−Δ_comb,prev| < {args.delta_convergence_threshold} "
@@ -1110,17 +1677,50 @@ def train_session(env, benchmarks, args, session_id, device):
 
     # ---------- post-training analysis ----------
     limit_strat = compute_limit_strategy(agents, obs_normalizers, env, benchmarks)
-    deviation_exp = run_deviation_experiment(env, agents, obs_normalizers)
+
+    def _run_dev():
+        return run_deviation_experiment(
+            env, agents, obs_normalizers,
+            deviation_frac=args.deviation_frac,
+            warmup=args.deviation_warmup,
+            horizon=args.deviation_horizon,
+            pre=args.deviation_pre,
+            deviation_len=args.deviation_len,
+        )
+
+    if env.demand_shock > 0:
+        # Imperfect monitoring (Calvano et al. 2021, Fig. 4): run the impulse
+        # response with demand FROZEN in each state to avoid confounding the
+        # rivals' reaction with demand shocks.
+        deviation_states = {}
+        for st in ("low", "high"):
+            env.freeze_demand(st)
+            deviation_states[st] = _run_dev()
+        env.freeze_demand(None)
+        deviation_exp = deviation_states["low"]   # primary (fully-revealing state)
+    else:
+        deviation_states = None
+        deviation_exp = _run_dev()
 
     final_avg_step = {}
     for fid in range(NUM_FIRMS):
-        if recent_profits[fid]:
-            final_avg_step[fid] = float(np.mean(recent_profits[fid])) / args.episode_len
+        if recent_step_profits[fid]:
+            final_avg_step[fid] = float(np.mean(recent_step_profits[fid]))
         else:
             final_avg_step[fid] = 0.0
     final_delta_combined = compute_combined_delta(
         final_avg_step, pi_nash, pi_mono
     )
+
+    if record_samples and sample_x:
+        import os
+        os.makedirs(args.output_dir, exist_ok=True)
+        np.savez(
+            os.path.join(args.output_dir, f"samples_session_{session_id}.npz"),
+            x=np.array(sample_x),
+            ent=np.array(sample_ent, dtype=float),
+            **{f"firm_{f}": np.array(sample_y[f]) for f in range(NUM_FIRMS)},
+        )
 
     return {
         "session_id": session_id,
@@ -1132,6 +1732,7 @@ def train_session(env, benchmarks, args, session_id, device):
         "metrics": log_rows,
         "limit_strategy": limit_strat,
         "deviation_experiment": deviation_exp,
+        "deviation_experiment_states": deviation_states,
         "agents": agents,
         "obs_normalizers": obs_normalizers,
     }
@@ -1148,21 +1749,33 @@ def main(args):
     env = ElectricityMarketEnv(
         history_len=args.history_len,
         episode_len=args.episode_len,
+        include_past_gen=args.include_past_gen,
+        include_prev_reward=args.include_prev_reward,
+        obs_mode=args.obs_mode,
+        demand_shock=args.demand_shock,
+        shock_seed=args.seed,
+        shock_persistence=args.shock_persistence,
     )
 
-    # Compute benchmarks
+    # Compute benchmarks. The Δ floor is the Nash–Cournot LCP of the paper
+    # (eqs. 39–45, PATH-style stacked KKT). The env-consistent BR fixed point
+    # is computed as a diagnostic: when the Nash point is export-congested the
+    # two coincide, which confirms the LCP Nash is attainable in the simulator.
     print("\n=== Benchmarks (Cournot–Nash MCP may take a few seconds) ===")
     benchmarks = {
         "competitive": compute_competitive_benchmark(env),
         "cournot_nash": compute_cournot_nash_benchmark(env),
+        "cournot_nash_env": compute_env_nash_benchmark(env),
         "monopoly": compute_monopoly_benchmark(env),
     }
 
     comp = benchmarks["competitive"]
     cn = benchmarks["cournot_nash"]
+    cn_env = benchmarks["cournot_nash_env"]
     mono = benchmarks["monopoly"]
-    print(f"  Competitive:    avg LMP ${comp['avg_lmp']:.2f}  |  total π={comp['profits']['0']+comp['profits']['1']:.1f}/step")
+    print(f"  Competitive:    avg LMP ${comp['avg_lmp']:.2f}  |  total π={comp['total_profit']:.1f}/step")
     print(f"  Cournot–Nash:   avg LMP ${cn['avg_lmp']:.2f}  |  total π={cn['total_profit']:.1f}/step  (MCP res {cn['mcp_max_residual']:.2e})")
+    print(f"  Env-BR Nash:    avg LMP ${cn_env['avg_lmp']:.2f}  |  total π={cn_env['total_profit']:.1f}/step  (diagnostic; BR res {cn_env['br_residual_mw']:.2f} MW)")
     print(f"  Monopoly:       avg LMP ${mono['avg_lmp']:.2f}  |  total π={mono['total_profit']:.1f}/step")
     denom = mono["total_profit"] - cn["total_profit"]
     print(f"  Combined Δ: 0 at Nash, 1 at monopoly  (Σπ^Mono−Σπ^Nash = {denom:.1f} $/step)")
@@ -1174,6 +1787,19 @@ def main(args):
 
     config = vars(args)
     config["benchmarks"] = benchmarks
+    # Market structure metadata so the plot layer maps firms<->plants correctly
+    # (in the two-firm market firm 0 owns plants 0 and 1).
+    from iso_market.node_network import MARKET as _market_name, P0 as _P0, Q0 as _Q0
+    config["market"] = _market_name
+    config["num_firms"] = NUM_FIRMS
+    config["firm_plant_idx"] = {str(f): idxs for f, idxs in FIRM_PLANT_IDX.items()}
+    # Aggregate inverse demand p̄(G) = choke_over_B + u − G/B (used by the
+    # Fig-3-style average-limit-strategy overlay; additive shock u shifts it).
+    _B = float(np.sum(_Q0.astype(float) / _P0.astype(float)))
+    config["aggregate_demand"] = {
+        "choke_over_B": float(np.sum(_Q0.astype(float)) / _B),
+        "inv_B": 1.0 / _B,
+    }
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
@@ -1201,6 +1827,7 @@ def main(args):
             "metrics": result["metrics"],
             "limit_strategy": result["limit_strategy"],
             "deviation_experiment": result["deviation_experiment"],
+            "deviation_experiment_states": result["deviation_experiment_states"],
         }
         with open(sess_dir / "session.json", "w") as f:
             json.dump(sess_data, f, indent=2)
@@ -1255,6 +1882,94 @@ def parse_args():
     # Environment
     p.add_argument("--history-len", type=int, default=1)
     p.add_argument("--episode-len", type=int, default=168)
+    p.add_argument(
+        "--no-past-gen",
+        dest="include_past_gen",
+        action="store_false",
+        help="Drop last period's per-plant generation from the state (default: included).",
+    )
+    p.add_argument(
+        "--no-prev-reward",
+        dest="include_prev_reward",
+        action="store_false",
+        help="Drop each firm's own previous-period reward from the state (default: included).",
+    )
+    p.set_defaults(include_past_gen=True, include_prev_reward=True)
+    p.add_argument(
+        "--obs-mode",
+        type=str,
+        default="full",
+        choices=("full", "price_only", "price_own"),
+        help="full: LMPs+flows+shadow prices (+past gen, +own reward). "
+        "price_only: the state is last period's nodal LMPs ONLY — the imperfect-"
+        "monitoring baseline of Calvano et al. (2021), s_t = p_{t-1}. "
+        "price_own: LMPs + OWN last total output (their variant "
+        "s_i = {q_{i,t-1}, p_{t-1}}; punishment phases can persist as a "
+        "self-referential state loop).",
+    )
+    p.add_argument(
+        "--shock-persistence",
+        type=float,
+        default=0.5,
+        help="Two-state Markov stay-probability for the demand shock "
+        "(0.5 = i.i.d., the paper baseline; e.g. 0.9 = persistent load states).",
+    )
+    p.add_argument(
+        "--demand-shock",
+        type=float,
+        default=0.0,
+        help="Imperfect monitoring: i.i.d. per-period shock u_t ∈ {−u,+u} ($/MWh, "
+        "equally likely) added to every node's inverse-demand intercept AFTER firms "
+        "commit output. Unobserved by firms. 0 disables (deterministic demand). "
+        "Benchmarks are unchanged (certainty equivalence).",
+    )
+
+    # Policy initialization
+    p.add_argument(
+        "--init-policy",
+        type=str,
+        default="competitive",
+        choices=("competitive", "neutral", "default"),
+        help="competitive: start each firm's policy at the competitive (MAX-output) "
+        "baseline — the trajectory can then only DESCEND (no upward exploration is "
+        "possible from the capacity ceiling). neutral: start at --init-fraction of "
+        "capacity (interior) so agents can explore BOTH up and down before settling. "
+        "default: standard random init (mean ≈ 0.5·cap).",
+    )
+    p.add_argument(
+        "--init-fraction",
+        type=float,
+        default=0.5,
+        help="Target Beta mean (fraction of capacity) for --init-policy neutral. "
+        "0.5 starts each firm mid-range so exploration is two-sided.",
+    )
+    p.add_argument(
+        "--init-concentration",
+        type=float,
+        default=2.5,
+        help="Initial Beta concentration α+β at the target mean (lower = broader initial "
+        "sampling / wider starting band).",
+    )
+    p.add_argument(
+        "--init-weight-scale",
+        type=float,
+        default=0.3,
+        help="Scale applied to the actor output-layer weights at init so seeds spread "
+        "around the competitive baseline instead of collapsing onto one point.",
+    )
+
+    # Post-training deviation (impulse-response) experiment
+    p.add_argument("--deviation-frac", type=float, default=0.2)
+    p.add_argument("--deviation-len", type=int, default=1,
+                   help="Consecutive periods the deviator's output is forced up "
+                        "(1 = classic Calvano one-period cheat; >1 = sustained cheat, "
+                        "a persistent off-path signal for one-period-memory rivals).")
+    p.add_argument("--deviation-warmup", type=int, default=20)
+    p.add_argument("--deviation-horizon", type=int, default=40)
+    p.add_argument("--deviation-pre", type=int, default=4,
+                   help="Resting periods recorded BEFORE the forced deviation, so the "
+                        "punishment figure shows the flat collusive baseline -> cheat -> "
+                        "retaliation -> recovery.")
 
     # PPO
     p.add_argument("--total-timesteps", type=int, default=500_000,
@@ -1266,7 +1981,25 @@ def parse_args():
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-eps", type=float, default=0.2)
-    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--ent-coef", type=float, default=0.01,
+                   help="Entropy bonus (exploration). Starting value when annealing.")
+    p.add_argument("--ent-coef-final", type=float, default=None,
+                   help="If set, LINEARLY ANNEAL the entropy coefficient from --ent-coef "
+                        "to this value over training: high exploration early -> exploitation "
+                        "late. Unset = constant --ent-coef (no schedule).")
+    p.add_argument("--anneal-lr", action="store_true", default=False,
+                   help="Linearly decay the learning rate over training (standard PPO "
+                        "schedule; sharpens late-stage exploitation/convergence). Decays "
+                        "to 0 unless --lr-final sets a floor.")
+    p.add_argument("--lr-final", type=float, default=None,
+                   help="LR FLOOR for --anneal-lr (e.g. 3e-5 = 10%% of the default LR). "
+                        "With a floor, convergence must be earned under continued "
+                        "meaningful updates instead of being scheduled by a vanishing LR. "
+                        "Recommended with --convergence-mode strategy.")
+    p.add_argument("--record-samples", action="store_true", default=False,
+                   help="Record every per-step SAMPLED generation to output-dir/"
+                        "samples_session_<id>.npz (for the haphazard-exploration scatter). "
+                        "Use with --num-sessions 1.")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--hidden-dim", type=int, default=64)
@@ -1278,10 +2011,21 @@ def parse_args():
         "--convergence-mode",
         type=str,
         default="delta",
-        choices=("delta", "kl", "none"),
+        choices=("delta", "kl", "strategy", "none"),
         help="delta: stop when |Δ_comb−Δ_comb,prev| < --delta-convergence-threshold for "
         "--convergence-patience updates. kl: same with policy KL vs --kl-threshold. "
+        "strategy: LIMIT-STRATEGY stability — the deterministic policy probed on a "
+        "fixed grid of price-states (incl. off-path low prices) must move less than "
+        "--strategy-tol-mw for patience updates; the PPO analogue of the paper's "
+        "'greedy strategy unchanged for 100k periods', immune to demand-shock noise. "
         "none: never early-stop on convergence (run full --total-timesteps; patience ignored).",
+    )
+    p.add_argument(
+        "--strategy-tol-mw",
+        type=float,
+        default=0.75,
+        help="strategy mode: max MW movement of any firm's probed deterministic "
+        "output between consecutive updates counted as 'unchanged'.",
     )
     p.add_argument(
         "--convergence-patience",

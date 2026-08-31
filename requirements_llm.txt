@@ -1,0 +1,18 @@
+# Extra dependencies for the LLM-agent ecosystem (llm_market/).
+# Requires Python >= 3.10 (vLLM 0.11 uses PEP-604 type syntax).
+# Install into a SEPARATE environment on scratch (see run_gilbreth_llm.sh).
+
+# Pinned to a CUDA-12 / torch-2.8 stack proven on A100-40GB. Do NOT loosen to
+# >=; the latest vLLM pulls CUDA 13 / torch 2.11, which can mismatch the cluster
+# driver. vLLM is abi3, so this wheel works on Python 3.10-3.13.
+vllm==0.11.0
+transformers>=4.45.0,<5
+accelerate>=0.34.0
+
+# Needed by the reused market env + benchmarks (iso_market / experiments.ppo):
+numpy>=1.24
+scipy>=1.10
+cvxpy>=1.4
+
+# Plotting (reuses experiments/plot_results.py):
+matplotlib>=3.7

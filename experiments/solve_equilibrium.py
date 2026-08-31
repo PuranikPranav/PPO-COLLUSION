@@ -3,18 +3,24 @@ import numpy as np
 import cvxpy as cp
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from iso_market.node_network import P0, Q0, get_ptdf_matrix, MC, QC
+from iso_market.node_network import (
+    P0, Q0, get_ptdf_matrix, MC, QC, CAP, LINE_LIMITS, PLANT_SPECS,
+)
 
 # Aliases for clarity within this file
 P0_VALS = P0.astype(float)
 Q0_VALS = Q0.astype(float)
+
+# Plant layout comes from the active market (node_network.PLANT_SPECS).
+PLANT_KEYS = [key for _f, _n, key in PLANT_SPECS]
+PLANT_NODES = [n for _f, n, _k in PLANT_SPECS]
 
 
 class EquilibriumSolver:
     def __init__(self):
         self.ptdf = get_ptdf_matrix()
         # Line Indices: 0:(1-2), 1:(2-3), 2:(1-3), 3:(3-4), 4:(4-5)
-        self.line_limits = np.array([40.0, 40.0, 40.0, 40.0, 30.0])
+        self.line_limits = LINE_LIMITS.astype(float)
 
     # =========================================================================
     # 1. PERFECT COMPETITION (Constrained DC-OPF)
@@ -22,20 +28,19 @@ class EquilibriumSolver:
     def solve_competitive(self):
         print("\n--- 1. Solving Perfect Competition (Constrained DC-OPF) ---")
 
-        g1_n1 = cp.Variable(nonneg=True)
-        g1_n2 = cp.Variable(nonneg=True)
-        g2_n2 = cp.Variable(nonneg=True)
+        g = [cp.Variable(nonneg=True) for _ in PLANT_KEYS]
         d = cp.Variable(5, nonneg=True)
 
         # Objective: Total Welfare (Benefit - Cost)
         # Benefit_i = P0_i * d_i - 0.5 * (P0_i / Q0_i) * d_i^2
         benefit = cp.sum(cp.multiply(P0_VALS, d) - 0.5 * cp.multiply(P0_VALS / Q0_VALS, cp.square(d)))
-        cost = (MC['Firm1_Node1']*g1_n1 + 0.5*QC['Firm1_Node1']*g1_n1**2) + \
-               (MC['Firm1_Node2']*g1_n2 + 0.5*QC['Firm1_Node2']*g1_n2**2) + \
-               (MC['Firm2_Node2']*g2_n2 + 0.5*QC['Firm2_Node2']*g2_n2**2)
+        cost = sum(MC[k] * g[i] + 0.5 * QC[k] * g[i] ** 2 for i, k in enumerate(PLANT_KEYS))
 
-        # Net Injection Vector: Node 1 has g1_n1, Node 2 has g1_n2 + g2_n2, Nodes 3-5 have no generators
-        y = cp.hstack([g1_n1 - d[0], g1_n2 + g2_n2 - d[1], -d[2], -d[3], -d[4]])
+        # Net Injection Vector (all plants at node 2; other nodes are demand-only)
+        gen_node = [0.0] * 5
+        for i, node in enumerate(PLANT_NODES):
+            gen_node[node] = gen_node[node] + g[i]
+        y = cp.hstack([gen_node[i] - d[i] for i in range(5)])
         flows = self.ptdf @ y
 
         # --- CONSTRAINTS ---
@@ -43,11 +48,9 @@ class EquilibriumSolver:
         c_bal = (cp.sum(y) == 0)
         c_therm_max = (flows <= self.line_limits)
         c_therm_min = (flows >= -self.line_limits)
-        c_cap_g1n1 = (g1_n1 <= 150)
-        c_cap_g1n2 = (g1_n2 <= 50)
-        c_cap_g2n2 = (g2_n2 <= 100)
+        c_caps = [g[i] <= CAP[k] for i, k in enumerate(PLANT_KEYS)]
 
-        constrs = [c_bal, c_therm_max, c_therm_min, c_cap_g1n1, c_cap_g1n2, c_cap_g2n2]
+        constrs = [c_bal, c_therm_max, c_therm_min] + c_caps
 
         prob = cp.Problem(cp.Maximize(benefit - cost), constrs)
         prob.solve()
@@ -59,13 +62,12 @@ class EquilibriumSolver:
         avg_price = np.sum(lmps * d.value) / np.sum(d.value)
 
         print(f"  > Solver Status: {prob.status}")
-        print(f"  > Avg Price (qty-weighted): ${avg_price:.2f} / MWh  [Paper: ~23.47]")
+        print(f"  > Avg Price (qty-weighted): ${avg_price:.2f} / MWh")
 
         print("\n  --- GENERATION QUANTITIES (MW) ---")
-        print(f"  Firm 1 (Node 1): {g1_n1.value:.2f} MW")
-        print(f"  Firm 1 (Node 2): {g1_n2.value:.2f} MW")
-        print(f"  Firm 2 (Node 2): {g2_n2.value:.2f} MW")
-        print(f"  Total Gen:       {(g1_n1.value + g1_n2.value + g2_n2.value):.2f} MW")
+        for i, k in enumerate(PLANT_KEYS):
+            print(f"  {k}: {g[i].value:.2f} MW")
+        print(f"  Total Gen:       {sum(gi.value for gi in g):.2f} MW")
 
         print("\n  --- NODAL LMPs ($/MWh) ---")
         for i in range(5):
@@ -93,9 +95,9 @@ class EquilibriumSolver:
             print("  > STATUS: UNCONGESTED")
 
         return {
-            'g_f1_n1': g1_n1.value,
-            'g_f1_n2': g1_n2.value,
-            'g_f2_n2': g2_n2.value,
+            'g_f1_n1': g[0].value,
+            'g_f2_n2': g[1].value,
+            'g_f3_n2': g[2].value,
             'd': d.value,
             'lmps': lmps,
             'avg_price': avg_price,
@@ -115,26 +117,20 @@ class UnconstrainedEquilibriumSolver:
     def solve_competitive(self):
         print("\n--- 1. Solving Perfect Competition (Unconstrained) ---")
 
-        g1_n1 = cp.Variable(nonneg=True)
-        g1_n2 = cp.Variable(nonneg=True)
-        g2_n2 = cp.Variable(nonneg=True)
+        g = [cp.Variable(nonneg=True) for _ in PLANT_KEYS]
         d = cp.Variable(5, nonneg=True)
 
         # Consumer Benefit: Sum of areas under inverse demand curves
         # Benefit_i = P0_i * d_i - 0.5 * (P0_i / Q0_i) * d_i^2
         benefit = cp.sum(cp.multiply(P0_VALS, d) - 0.5 * cp.multiply(P0_VALS / Q0_VALS, cp.square(d)))
 
-        cost = (MC['Firm1_Node1']*g1_n1 + 0.5*QC['Firm1_Node1']*g1_n1**2) + \
-               (MC['Firm1_Node2']*g1_n2 + 0.5*QC['Firm1_Node2']*g1_n2**2) + \
-               (MC['Firm2_Node2']*g2_n2 + 0.5*QC['Firm2_Node2']*g2_n2**2)
+        cost = sum(MC[k] * g[i] + 0.5 * QC[k] * g[i] ** 2 for i, k in enumerate(PLANT_KEYS))
 
         # Global Power Balance (Copper Plate): Total Supply == Total Demand
-        c_global_balance = (g1_n1 + g1_n2 + g2_n2 == cp.sum(d))
-        c_cap_g1n1 = (g1_n1 <= 150)
-        c_cap_g1n2 = (g1_n2 <= 50)
-        c_cap_g2n2 = (g2_n2 <= 100)
+        c_global_balance = (sum(g) == cp.sum(d))
+        c_caps = [g[i] <= CAP[k] for i, k in enumerate(PLANT_KEYS)]
 
-        constrs = [c_global_balance, c_cap_g1n1, c_cap_g1n2, c_cap_g2n2]
+        constrs = [c_global_balance] + c_caps
 
         prob = cp.Problem(cp.Maximize(benefit - cost), constrs)
         prob.solve()
@@ -147,22 +143,21 @@ class UnconstrainedEquilibriumSolver:
 
         print("\n  --- MARKET OUTCOMES ---")
         print(f"  System Price:    ${p_system:.2f} / MWh")
-        print(f"  Total Gen:       {(g1_n1.value + g1_n2.value + g2_n2.value):.2f} MW")
+        print(f"  Total Gen:       {sum(gi.value for gi in g):.2f} MW")
         print(f"  Total Demand:    {np.sum(d.value):.2f} MW")
 
         print("\n  --- GENERATION DETAILS ---")
-        print(f"  Firm 1 (Node 1): {g1_n1.value:.2f} MW (Max 150)")
-        print(f"  Firm 1 (Node 2): {g1_n2.value:.2f} MW (Max 50)")
-        print(f"  Firm 2 (Node 2): {g2_n2.value:.2f} MW (Max 100)")
+        for i, k in enumerate(PLANT_KEYS):
+            print(f"  {k}: {g[i].value:.2f} MW (Max {CAP[k]:.0f})")
 
         print("\n  --- NODAL DEMAND ---")
         for i in range(5):
             print(f"  Node {i+1}: {d.value[i]:.2f} MW")
 
         return {
-            'g_f1_n1': g1_n1.value,
-            'g_f1_n2': g1_n2.value,
-            'g_f2_n2': g2_n2.value,
+            'g_f1_n1': g[0].value,
+            'g_f2_n2': g[1].value,
+            'g_f3_n2': g[2].value,
             'd': d.value,
             'price': p_system,
         }
@@ -170,22 +165,32 @@ class UnconstrainedEquilibriumSolver:
 
 def solve_cournot_nash(verbose=True):
     """
-    Nash–Cournot benchmark (stacked KKT MCP, same as model.mod).
-    Delegates to experiments.ppo.compute_cournot_nash_benchmark.
+    Nash–Cournot benchmark (paper eqs. 39–45: stacked-KKT LCP, PATH-style).
+    Delegates to experiments.ppo.compute_cournot_nash_benchmark. Also prints
+    the env-consistent BR fixed point as a diagnostic — when the Nash point is
+    export-congested the two coincide, confirming the LCP Nash is attainable
+    in the simulator.
     """
     from iso_market.market_env import ElectricityMarketEnv
-    from experiments.ppo import compute_cournot_nash_benchmark
+    from experiments.ppo import (
+        compute_cournot_nash_benchmark,
+        compute_env_nash_benchmark,
+    )
 
     env = ElectricityMarketEnv()
     out = compute_cournot_nash_benchmark(env)
     if verbose:
-        print("\n--- Cournot–Nash (MCP) ---")
+        print("\n--- Cournot–Nash (MCP, paper eqs. 39-45) ---")
         print(f"  Avg LMP (qty-weighted): ${out['avg_lmp']:.2f} / MWh")
         print(f"  Total profit ($/step):  {out['total_profit']:.2f}")
-        print(f"  Generation (MW):        {out['gens']}")
+        print(f"  Generation (MW):        {[round(g, 1) for g in out['gens']]}")
         print(f"  MCP max residual:       {out['mcp_max_residual']:.2e}")
         for fid, p in out["profits"].items():
             print(f"  Firm {fid} profit:        ${float(p):.2f}")
+        ref = compute_env_nash_benchmark(env)
+        print("  [diagnostic: env-BR Nash "
+              f"LMP ${ref['avg_lmp']:.2f}, π ${ref['total_profit']:.1f}, "
+              f"gens {[round(g, 1) for g in ref['gens']]}]")
     return out
 
 

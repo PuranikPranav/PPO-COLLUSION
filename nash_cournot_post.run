@@ -1,0 +1,15 @@
+param LMP_post {i in NODES};
+let {i in NODES} LMP_post[i] := p_hub + (if i == N then 0 else w[i]);
+
+param Firm_Profit_post {f in FIRMS};
+let {f in FIRMS} Firm_Profit_post[f] := sum {i in NODES : (f, i) in G} (
+    LMP_post[i] * g[f,i] - (MC[f,i]*g[f,i] + 0.5*QC[f,i]*(g[f,i]^2))
+);
+
+param Total_Profit_post = sum {f in FIRMS} Firm_Profit_post[f];
+param Total_Gen_post = sum {(f,i) in G} g[f,i];
+
+printf "\n=== Nash-Cournot (PATH) ===\n";
+display g;
+display LMP_post;
+display Firm_Profit_post, Total_Profit_post, Total_Gen_post;

@@ -1,0 +1,35 @@
+# ============================================================
+# NEOS Commands box ONLY — Joint Monopoly on Knitro
+# ============================================================
+# Model box : monopoly.mod
+# Data box  : cournot_data.dat
+# Solver    : Knitro
+# Do NOT write "model ..." or "data ..." here — NEOS loads those.
+# ============================================================
+
+option solver knitro;
+option knitro_options "outlev=1 algorithm=3 bar_murule=4";
+solve;
+
+param LMP_post {i in NODES};
+let {i in NODES} LMP_post[i] := p_hub + (if i == N then 0 else w[i]);
+
+param Firm_Profit_post {f in FIRMS};
+let {f in FIRMS} Firm_Profit_post[f] := sum {i in NODES : (f, i) in G} (
+    LMP_post[i] * g[f,i] - (MC[f,i]*g[f,i] + 0.5*QC[f,i]*(g[f,i]^2))
+);
+
+param Total_Profit_post = sum {f in FIRMS} Firm_Profit_post[f];
+param Total_Gen_post = sum {(f,i) in G} g[f,i];
+
+# Line flows in hub-spoke: f_l = sum_i PTDF[l,i] * y[i]
+param Flow_post {l in LINES};
+let {l in LINES} Flow_post[l] := sum {i in SPOKES} PTDF[l,i] * y[i];
+
+printf "\n=== Joint Monopoly (Knitro) ===\n";
+display g;
+display LMP_post;
+display Firm_Profit_post, Total_Profit_post, Total_Gen_post;
+printf "Cartel objective = %g\n", Cartel_Profit;
+display Flow_post, T;
+printf "Binding check: compare |Flow_post| to T (should be strictly less).\n";

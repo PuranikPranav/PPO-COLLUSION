@@ -1,0 +1,38 @@
+=== recipe 0: q0hub=450.0 MC=[15. 18.] QC=[0.08 0.05] ===
+  [r0 it0] LIM=[50. 42. 38. 25. 15.] caps=[155. 160.] gap=+8.0% IR=(1.08,1.08) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r0 it1] LIM=[63. 42. 38. 25. 15.] caps=[160. 165.] gap=+1.9% IR=(1.01,1.03) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r0 it2] LIM=[63. 37. 38. 25. 15.] caps=[160. 165.] gap=+7.1% IR=(1.07,1.07) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r0 it3] LIM=[63. 47. 38. 25. 15.] caps=[165. 170.] gap=+1.6% IR=(1.01,1.03) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r0 it4] LIM=[56. 47. 38. 25. 15.] caps=[160. 165.] gap=+4.2% IR=(1.03,1.05) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r0 it5] LIM=[50. 47. 38. 25. 15.] caps=[155. 160.] gap=+8.0% IR=(1.08,1.08) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r0 it6] LIM=[63. 47. 38. 25. 15.] caps=[165. 170.] gap=+1.6% IR=(1.01,1.03) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r0 it7] LIM=[56. 47. 38. 25. 15.] caps=[160. 165.] gap=+4.2% IR=(1.03,1.05) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+=== recipe 1: q0hub=350.0 MC=[15. 17.] QC=[0.09  0.055] ===
+  [r1 it0] LIM=[50. 42. 38. 25. 15.] caps=[130. 140.] gap=+7.5% IR=(1.02,1.13) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r1 it1] LIM=[63. 42. 38. 25. 15.] caps=[135. 145.] gap=+0.8% IR=(0.95,1.07) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r1 it2] LIM=[63. 37. 38. 25. 15.] caps=[130. 140.] gap=+6.4% IR=(1.01,1.12) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r1 it3] LIM=[63. 47. 38. 25. 15.] caps=[135. 145.] gap=+0.8% IR=(0.95,1.07) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r1 it4] LIM=[55. 47. 38. 25. 15.] caps=[135. 140.] gap=+3.8% IR=(0.97,1.10) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r1 it5] LIM=[49. 47. 38. 25. 15.] caps=[130. 140.] gap=+8.0% IR=(1.03,1.13) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r1 it6] LIM=[62. 47. 38. 25. 15.] caps=[135. 145.] gap=+0.8% IR=(0.95,1.07) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r1 it7] LIM=[55. 47. 38. 25. 15.] caps=[135. 140.] gap=+3.8% IR=(0.97,1.10) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+=== recipe 2: q0hub=550.0 MC=[14. 17.] QC=[0.07  0.045] ===
+  [r2 it0] LIM=[58. 48. 44. 25. 15.] caps=[190. 195.] gap=+4.7% IR=(1.04,1.05) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r2 it1] LIM=[52. 48. 44. 25. 15.] caps=[185. 190.] gap=+8.1% IR=(1.09,1.07) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r2 it2] LIM=[66. 48. 44. 25. 15.] caps=[195. 200.] gap=+2.2% IR=(1.02,1.03) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r2 it3] LIM=[58. 48. 44. 25. 15.] caps=[190. 195.] gap=+4.7% IR=(1.04,1.05) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r2 it4] LIM=[52. 48. 44. 25. 15.] caps=[185. 190.] gap=+8.1% IR=(1.09,1.07) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r2 it5] LIM=[66. 48. 44. 25. 15.] caps=[195. 200.] gap=+2.2% IR=(1.02,1.03) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r2 it6] LIM=[58. 48. 44. 25. 15.] caps=[190. 195.] gap=+4.7% IR=(1.04,1.05) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r2 it7] LIM=[52. 48. 44. 25. 15.] caps=[185. 190.] gap=+8.1% IR=(1.09,1.07) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+=== recipe 3: q0hub=450.0 MC=[16. 18.] QC=[0.1  0.06] ===
+  [r3 it0] LIM=[50. 42. 38. 25. 15.] caps=[145. 160.] gap=+6.9% IR=(1.00,1.13) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r3 it1] LIM=[63. 42. 38. 25. 15.] caps=[150. 165.] gap=+1.5% IR=(0.95,1.08) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r3 it2] LIM=[63. 38. 38. 25. 15.] caps=[145. 165.] gap=+4.9% IR=(0.98,1.12) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r3 it3] LIM=[63. 48. 38. 25. 15.] caps=[150. 165.] gap=+1.5% IR=(0.95,1.08) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r3 it4] LIM=[54. 48. 38. 25. 15.] caps=[150. 165.] gap=+4.1% IR=(0.97,1.11) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+  [r3 it5] LIM=[48. 48. 38. 25. 15.] caps=[145. 160.] gap=+7.8% IR=(1.01,1.14) monoUnb=False nashBinds=True genOrd=True lmpOrd=True 
+  [r3 it6] LIM=[61. 48. 38. 25. 15.] caps=[150. 165.] gap=+1.5% IR=(0.95,1.08) monoUnb=True nashBinds=False genOrd=True lmpOrd=True 
+  [r3 it7] LIM=[54. 48. 38. 25. 15.] caps=[150. 165.] gap=+4.1% IR=(0.97,1.11) monoUnb=True nashBinds=True genOrd=True lmpOrd=True 
+
+===== 0 passing recipes =====

@@ -1,0 +1,92 @@
+[ElectricityMarketEnv] obs_dim=19 (history_len=1, features/step=19; mode=full, past_gen=True, prev_reward=True, demand_shock=±$0.00) | baseline avg LMP=$36.41
+==============================================================================
+DISCRETE COURNOT GAME -- NETWORKED MARKET  [MARKET_CONFIG=three_firm_dist]
+==============================================================================
+agents=3  plants=3  k=15  |A_i|=15 each  profiles=3375  |S|(perfect)=3375
+xi=0.2  h=2  m=8.0  deterministic=False  price node=1  nash_mode=br
+
+Continuous benchmarks (repo solvers, per PLANT):
+  competitive  gen= 395.44  avgLMP=$ 27.03  pi=$ 1831.01  plants=[118.44, 138.76, 138.24]
+  nash         gen= 207.63  avgLMP=$ 58.13  pi=$ 8089.31  plants=[61.86, 107.55, 38.21]
+  monopoly     gen= 213.40  avgLMP=$ 57.16  pi=$ 8168.66  plants=[71.68, 72.68, 69.05]
+  nash(BR)     gen= 306.63  avgLMP=$ 41.83  pi=$ 6514.81  plants=[100.03, 102.06, 104.54]
+  mono(direct) gen= 213.40  avgLMP=$ 57.16  pi=$ 8168.56  plants=[71.68, 72.69, 69.03]
+    (MPEC monopoly earns $8168.56; grid centred on the DIRECT solution)
+
+  ^ the LCP 'nash' is NOT an equilibrium of the game the algorithms play:
+    it gives each firm its OWN node's inverse-demand slope, which is only
+    right when that node is islanded by congestion. Measured max unilateral
+    deviation gain at the LCP point: $1,287.58 (at the BR point: $0.00).
+    Delta is measured against nash(BR).
+
+Per-firm action grid (TOTAL MW; internal split = least-cost dispatch):
+  firm 0 (plants [0], nodes [0], cap 135): [  66.01 ...  105.70] step  2.83   (q^M= 71.68, q^N=100.03)
+  firm 1 (plants [1], nodes [1], cap 145): [  66.81 ...  107.93] step  2.94   (q^M= 72.69, q^N=102.06)
+  firm 2 (plants [2], nodes [2], cap 155): [  61.93 ...  111.64] step  3.55   (q^M= 69.03, q^N=104.54)
+  max |shadow price| over the whole grid: 15.5
+    ^ every firm owns ONE plant, so there is no internal split to make and congestion is simply part of the payoff
+
+Imperfect monitoring:
+  intercept shock u = +/- 4.283 $/MWh  (levels [-4.28, 4.28])
+  price impact of ONE output step (3.11 MW) = $0.535/MWh -> shock = 8 steps (paper m=8)
+  hub LMP (node 1) $33.74 - $64.56 in 51 bins of $0.616
+  non-revealing price states: measured 0.962 (paper closed form: 0.568)
+
+Grid benchmarks (these define Delta):
+  nash      a=[12, 12, 12] gen= 306.63  hubP=$ 41.24  pi=$ 6514.81  firms=[2174.1, 2184.9, 2155.8]
+            plants=[100.03, 102.06, 104.54]
+  monopoly  a=[2, 2, 2] gen= 213.40  hubP=$ 57.16  pi=$ 8168.56  firms=[2790.9, 2793.6, 2584.1]
+            plants=[71.68, 72.69, 69.03]
+  pure NE (1 found)
+  Nash->Monopoly profit gap: $1653.8 (25.4%)
+  per-firm cartel IR margins: [616.8, 608.7, 428.3] (ALL POSITIVE)
+==============================================================================
+
+>>> rich_stochastic: monitoring=rich (rich market signal [price, pocket_lmp, congestion, total_demand] (|S| = 192)), sessions=1000, alpha=0.15, beta=4e-06, delta=0.95
+
+    t=  100,000  eps=0.6703  learning=1000/1000  q=[ 94.1  97.6 101.7]  Delta=+0.228  [104s]
+    t=  200,000  eps=0.4493  learning=1000/1000  q=[93.2 90.6 99.5]  Delta=+0.365  [212s]
+    t=  300,000  eps=0.3012  learning=1000/1000  q=[92.1 89.1 97.7]  Delta=+0.420  [332s]
+    t=  400,000  eps=0.2019  learning=1000/1000  q=[91.4 88.7 96.6]  Delta=+0.450  [466s]
+    t=  500,000  eps=0.1353  learning=1000/1000  q=[90.8 88.6 95.8]  Delta=+0.469  [634s]
+    t=  600,000  eps=0.0907  learning=1000/1000  q=[90.5 88.8 95.5]  Delta=+0.476  [826s]
+    t=  700,000  eps=0.0608  learning=1000/1000  q=[90.3 89.5 95.4]  Delta=+0.472  [1025s]
+    t=  800,000  eps=0.0408  learning=1000/1000  q=[90.  90.5 95.5]  Delta=+0.464  [1228s]
+    t=  900,000  eps=0.0273  learning=1000/1000  q=[90.  90.2 95.8]  Delta=+0.466  [1470s]
+    t=1,000,000  eps=0.0183  learning=1000/1000  q=[89.5 89.4 95.8]  Delta=+0.486  [1687s]
+    t=1,100,000  eps=0.0123  learning=1000/1000  q=[89.  89.  95.3]  Delta=+0.507  [2108s]
+    t=1,200,000  eps=0.0082  learning=1000/1000  q=[88.2 88.2 94.7]  Delta=+0.538  [2736s]
+    t=1,300,000  eps=0.0055  learning=1000/1000  q=[87.8 87.9 94.2]  Delta=+0.557  [3375s]
+    t=1,400,000  eps=0.0037  learning=1000/1000  q=[87.1 87.3 93.6]  Delta=+0.583  [4095s]
+    t=1,500,000  eps=0.0025  learning=1000/1000  q=[86.5 86.8 93. ]  Delta=+0.609  [4793s]
+    t=1,600,000  eps=0.0017  learning= 999/1000  q=[86.5 86.7 92.8]  Delta=+0.613  [5445s]
+    t=1,700,000  eps=0.0011  learning= 997/1000  q=[86.  86.3 92.5]  Delta=+0.631  [6008s]
+    t=1,800,000  eps=0.0007  learning= 982/1000  q=[85.6 85.9 92. ]  Delta=+0.646  [8608s]
+    t=1,900,000  eps=0.0005  learning= 947/1000  q=[85.5 85.7 92. ]  Delta=+0.652  [9292s]
+    t=2,000,000  eps=0.0003  learning= 902/1000  q=[85.4 85.6 91.8]  Delta=+0.658  [9492s]
+    t=2,100,000  eps=0.0002  learning= 812/1000  q=[85.2 85.4 91.6]  Delta=+0.666  [10105s]
+    t=2,200,000  eps=0.0002  learning= 709/1000  q=[85.1 85.3 91.5]  Delta=+0.670  [10745s]
+    t=2,300,000  eps=0.0001  learning= 573/1000  q=[85.  85.3 91.5]  Delta=+0.672  [11299s]
+    t=2,400,000  eps=0.0001  learning= 434/1000  q=[85.  85.3 91.4]  Delta=+0.674  [11804s]
+    t=2,500,000  eps=0.0000  learning= 308/1000  q=[84.9 85.3 91.3]  Delta=+0.676  [12109s]
+    t=2,600,000  eps=0.0000  learning= 213/1000  q=[84.9 85.3 91.3]  Delta=+0.677  [12409s]
+    t=2,700,000  eps=0.0000  learning= 116/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [12585s]
+    t=2,800,000  eps=0.0000  learning=  52/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [12744s]
+    t=2,900,000  eps=0.0000  learning=  27/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [12864s]
+    t=3,000,000  eps=0.0000  learning=  14/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [12932s]
+    t=3,100,000  eps=0.0000  learning=   6/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [13073s]
+    t=3,200,000  eps=0.0000  learning=   1/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [13240s]
+    t=3,300,000  eps=0.0000  learning=   1/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [13382s]
+    t=3,400,000  eps=0.0000  learning=   1/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [15039s]
+    t=3,500,000  eps=0.0000  learning=   1/1000  q=[84.9 85.2 91.2]  Delta=+0.679  [15937s]
+
+=== rich_stochastic DONE in 265.8 min ===
+  sessions converged      : 100.0% (median at 2,355,520 iterations)
+  DELTA (profit gain)     : 67.93%  (+/- 0.26 s.e.)
+  Delta per firm          : [55.8, 56.2, 102.0] %
+  total generation        : 261.3 MW   (Nash 306.6 -> Monopoly 213.4)
+  hub LMP                 : $49.17      (Nash $41.24 -> Monopoly $57.16)
+  qty-weighted avg LMP    : $49.27
+  non-revealing prices    : 0.962
+  rich state |S|          : 192 [price, pocket_lmp, congestion, total_demand]
+  non-revealing STATES    : 0.801   (price-only 0.962, perfect 0.000)

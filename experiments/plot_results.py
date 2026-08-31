@@ -16,15 +16,19 @@ Cross-history comparison:
 
 Usage
 -----
-    python experiments/plot_results.py results/h1 --save figures/
-    python experiments/plot_results.py results/h1 --save figures/ --calvano-paper
-    python experiments/plot_results.py --compare results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-calvano results/h1 results/h2 results/h3 --save figures/
-    python experiments/plot_results.py --compare-generation-profit results/h1 results/h2 results/h3 --save figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/
+    python experiments/plot_results.py latest_results --save latest_results/figures/ --calvano-paper
+    python experiments/plot_results.py --compare \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
+    python experiments/plot_results.py --compare-calvano \
+        old_results/delta_crosshistory/h1 old_results/delta_crosshistory/h2 old_results/delta_crosshistory/h3 \
+        --save old_results/figures/crosshistory/
 """
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -40,6 +44,133 @@ from matplotlib.ticker import FuncFormatter
 
 # X-axis ticks for Calvano-style learning curves (environment steps)
 CALVANO_XTICKS = np.array([1, 500_000, 1_000_000, 1_500_000, 2_000_000], dtype=float)
+
+# ============================================================================
+#  House style — one cohesive, publication-quality look shared by every figure.
+#  Every plot is a SINGLE standalone axis (no mixed-scale subplot grids), so each
+#  figure carries exactly one message and one y-axis meaning.
+# ============================================================================
+FIRM_COLORS = ("#1b6ca8", "#e08a1e", "#3a9d5d")   # Firm 0 blue, Firm 1 amber, Firm 2 green
+FIRM_NAMES = ("Firm 0", "Firm 1", "Firm 2")
+NUM_FIRMS = len(FIRM_NAMES)  # three single-plant firms (firm f == plant f)
+# Benchmark reference lines: (color, linestyle) — identical everywhere they appear.
+BENCH_STYLE = {
+    "competitive": ("#2e8b57", (0, (6, 3))),       # sea green, dashed
+    "nash":        ("#b8860b", (0, (5, 2, 1, 2))),  # dark goldenrod, dash-dot
+    "monopoly":    ("#b3322c", (0, (1, 2))),        # brick red, dotted
+}
+ANCHOR_RED = "#d62728"   # the t=0 competitive start marker / deviation instant
+
+
+def _install_house_style():
+    plt.rcParams.update({
+        "figure.dpi": 120,
+        "savefig.dpi": 200,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "font.size": 12,
+        "font.family": "DejaVu Sans",
+        "axes.titlesize": 15,
+        "axes.titleweight": "bold",
+        "axes.titlepad": 12,
+        "axes.labelsize": 12.5,
+        "axes.labelcolor": "#222222",
+        "axes.edgecolor": "#9aa0a6",
+        "axes.linewidth": 1.0,
+        "axes.grid": True,
+        "axes.axisbelow": True,
+        "grid.color": "#cfd4da",
+        "grid.alpha": 0.7,
+        "grid.linewidth": 0.7,
+        "legend.frameon": True,
+        "legend.framealpha": 0.92,
+        "legend.edgecolor": "#d4d4d4",
+        "legend.fontsize": 9.5,
+        "legend.borderpad": 0.6,
+        "xtick.color": "#3c3c3c",
+        "ytick.color": "#3c3c3c",
+        "xtick.labelsize": 10.5,
+        "ytick.labelsize": 10.5,
+        "axes.prop_cycle": plt.cycler(color=list(FIRM_COLORS)),
+    })
+
+
+_install_house_style()
+
+
+def _polish(ax):
+    """Drop the top/right spines and lighten the remaining frame — the clean look
+    every figure shares."""
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#9aa0a6")
+    ax.grid(True, which="major", alpha=0.7)
+    return ax
+
+
+def _benchmark_hline(ax, value, kind, label):
+    """Draw a benchmark horizontal reference line in the shared house style."""
+    if value is None:
+        return
+    color, ls = BENCH_STYLE[kind]
+    ax.axhline(float(value), color=color, ls=ls, lw=1.7, alpha=0.95, zorder=2,
+               label=label)
+
+
+def _title_block(ax, main, sub=None):
+    """Bold main title + optional grey sub-line, placed above the axes with clear
+    vertical separation (no overlap). Saved figures use bbox_inches='tight', so the
+    titles are never clipped."""
+    ax.set_title("")  # clear any rcParams title slot
+    ax.text(0.5, 1.060, main, transform=ax.transAxes, ha="center", va="bottom",
+            fontsize=15, fontweight="bold", color="#1a1a1a")
+    if sub:
+        ax.text(0.5, 1.012, sub, transform=ax.transAxes, ha="center", va="bottom",
+                fontsize=10, color="#6a6a6a")
+
+
+def _settled_badge(ax, text):
+    """Small rounded annotation box (top-left) summarising the settled level."""
+    ax.text(
+        0.015, 0.97, text, transform=ax.transAxes, ha="left", va="top",
+        fontsize=10, color="#1a1a1a",
+        bbox=dict(boxstyle="round,pad=0.45", fc="#f6f7f9", ec="#c9cdd3", lw=1.0,
+                  alpha=0.95),
+    )
+
+
+def _legend(ax, loc="best", ncol=1):
+    leg = ax.legend(loc=loc, ncol=ncol)
+    if leg is not None:
+        leg.get_frame().set_linewidth(0.8)
+    return leg
+
+
+def _save(fig, save_dir: Path, name: str):
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / name
+    fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"Saved → {out}")
+
+
+def _firm_benchmark_levels(config):
+    """Per-firm (Competitive, Nash, Monopoly) generation levels in MW, or None.
+
+    Uses the firm->plant mapping stored in config.json, so multi-plant firms
+    (two-firm market) get their plants summed.
+    """
+    per_key = {
+        "competitive": _firm_bench_totals(config, "competitive"),
+        "nash": _firm_bench_totals(config, "cournot_nash"),
+        "monopoly": _firm_bench_totals(config, "monopoly"),
+    }
+    firms = _config_firm_structure(config)
+    return {
+        fid: {k: (v.get(fid) if v else None) for k, v in per_key.items()}
+        for fid in firms
+    }
 
 
 def load_sessions(run_dir: Path):
@@ -205,7 +336,7 @@ def _profit_key_for_firm(config, sessions, fid: int):
     can_reconstruct_combined = (
         cn and mono
         and delta_combined_key in keys
-        and all(str(f) in cn and str(f) in mono for f in range(2))
+        and all(str(f) in cn and str(f) in mono for f in range(NUM_FIRMS))
     )
 
     for sess in sessions:
@@ -213,8 +344,8 @@ def _profit_key_for_firm(config, sessions, fid: int):
             if ep_key in row:
                 row[reconstructed_key] = float(row[ep_key]) / episode_len
             elif can_reconstruct_combined and delta_combined_key in row:
-                pi_n = sum(float(cn[str(f)]) for f in range(2))
-                pi_m = sum(float(mono[str(f)]) for f in range(2))
+                pi_n = sum(float(cn[str(f)]) for f in range(NUM_FIRMS))
+                pi_m = sum(float(mono[str(f)]) for f in range(NUM_FIRMS))
                 total = pi_n + float(row[delta_combined_key]) * (pi_m - pi_n)
                 row[reconstructed_key] = total * (
                     float(cn.get(str(fid), 0)) / pi_n if pi_n > 1e-8 else 0.5
@@ -272,7 +403,7 @@ def _profit_series_specs(config, sessions):
         ], "plant"
 
     specs = []
-    for fid in range(2):
+    for fid in range(NUM_FIRMS):
         key = _profit_key_for_firm(config, sessions, fid)
         if key:
             specs.append((key, f"Firm {fid}", f"C{fid}"))
@@ -293,13 +424,10 @@ def _draw_generation_benchmarks(ax, config, series_kind):
             ax.axhline(val, ls=":", color=f"C{i}", alpha=0.28, linewidth=0.9)
         return
 
-    comp_f0 = comp[0] + comp[1]
-    comp_f1 = comp[2]
-    mono_f0 = mono[0] + mono[1]
-    mono_f1 = mono[2]
-    for fid, val in enumerate((comp_f0, comp_f1)):
+    # Firm-level lines: sum each firm's plants via the stored mapping.
+    for fid, val in (_firm_bench_totals(config, "competitive") or {}).items():
         ax.axhline(val, ls="--", color=f"C{fid}", alpha=0.25, linewidth=0.8)
-    for fid, val in enumerate((mono_f0, mono_f1)):
+    for fid, val in (_firm_bench_totals(config, "monopoly") or {}).items():
         ax.axhline(val, ls=":", color=f"C{fid}", alpha=0.32, linewidth=0.9)
 
 
@@ -309,11 +437,37 @@ def _draw_profit_benchmarks(ax, config, series_kind):
     bench = config.get("benchmarks", {})
     comp = bench.get("competitive", {}).get("profits", {})
     mono = bench.get("monopoly", {}).get("profits", {})
-    for fid in range(2):
+    for fid in range(NUM_FIRMS):
         if str(fid) in comp:
             ax.axhline(float(comp[str(fid)]), ls="--", color=f"C{fid}", alpha=0.25, linewidth=0.8)
         if str(fid) in mono:
             ax.axhline(float(mono[str(fid)]), ls=":", color=f"C{fid}", alpha=0.32, linewidth=0.9)
+
+
+def _config_firm_structure(config) -> dict:
+    """firm id -> list of plant indices, from config.json (written by ppo.py).
+
+    Falls back to the identity mapping (firm f == plant f) for runs recorded
+    before the mapping was stored — correct for the three-firm hub market.
+    """
+    fpi = config.get("firm_plant_idx")
+    if fpi:
+        return {int(k): list(v) for k, v in fpi.items()}
+    gens = config.get("benchmarks", {}).get("competitive", {}).get("gens") or []
+    n = config.get("num_firms") or min(NUM_FIRMS, len(gens) or NUM_FIRMS)
+    return {f: [f] for f in range(n)}
+
+
+def _firm_bench_totals(config, bench_key: str):
+    """firm id -> total benchmark MW for that firm (summing its plants)."""
+    gens = config.get("benchmarks", {}).get(bench_key, {}).get("gens")
+    if not gens:
+        return None
+    struct = _config_firm_structure(config)
+    return {
+        f: sum(gens[i] for i in idxs if i < len(gens))
+        for f, idxs in struct.items()
+    }
 
 
 def _metrics_has_key(sessions, key: str) -> bool:
@@ -325,12 +479,9 @@ def _metrics_has_key(sessions, key: str) -> bool:
 
 
 def _firm_comp_mono_total_mw(config):
-    bench = config["benchmarks"]
-    cg = bench["competitive"]["gens"]
-    mg = bench["monopoly"]["gens"]
-    comp = (cg[0] + cg[1], cg[2])
-    mono = (mg[0] + mg[1], mg[2])
-    return comp, mono
+    """firm id -> competitive / monopoly total MW (plants summed per firm)."""
+    return (_firm_bench_totals(config, "competitive") or {},
+            _firm_bench_totals(config, "monopoly") or {})
 
 
 def _calvano_xtick_formatter():
@@ -353,24 +504,77 @@ def _calvano_xtick_formatter():
     return FuncFormatter(fmt)
 
 
-def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=None):
+def _calvano_x_axis(sessions, hard_cap=2_000_000):
+    """Return (display_max, xticks) for the Calvano time figures.
+
+    A full-length (≈2M-timestep) run reproduces the original fixed 2M axis and
+    ticks exactly. A SHORTER run (e.g. a quick demo or a partial/early-stopped
+    run) gets an axis scaled to the data so the curves are not crammed into the
+    far-left sliver of a 2M-wide plot. The shared tick formatter already renders
+    arbitrary sub-2M ticks (e.g. "50,000"), so only the limit and tick positions
+    need to adapt.
     """
-    Figure 1: greedy (deterministic-policy) mean quantity vs steps + competitive/monopoly horizontals.
-    Figure 2: normalized profit Δ from greedy counterfactual clear vs steps.
-    X-axis: 1, 0.5M, 1M, 1.5M, 2M timesteps (capped at 2M for display).
+    max_step = 0
+    for sess in sessions:
+        for row in sess.get("metrics") or []:
+            s = row.get("step")
+            if isinstance(s, (int, float)) and s > max_step:
+                max_step = s
+    max_step = min(max_step, hard_cap)
+    # Long runs (or no data) keep the original fixed 2M axis unchanged.
+    if max_step >= 1_500_000 or max_step <= 0:
+        return float(hard_cap), CALVANO_XTICKS
+    # Pick a "nice" tick step (~max/4 rounded to 1/2/2.5/5 ×10^k) and a clean max.
+    raw = max_step / 4.0
+    mag = 10 ** math.floor(math.log10(raw))
+    step = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)
+    display_max = math.ceil(max_step / step) * step
+    ticks = np.arange(0.0, display_max + step / 2, step)
+    ticks[0] = 1.0  # anchor the first tick at the t=1 start (matches 2M-run convention)
+    return float(display_max), ticks
+
+
+def _calvano_time_axis(ax, max_steps, calvano_xticks):
+    """Shared time x-axis (timesteps, adaptive ticks) for the Calvano figures."""
+    ax.set_xlim(0, max_steps)
+    ax.set_xticks(calvano_xticks)
+    ax.xaxis.set_major_formatter(_calvano_xtick_formatter())
+    ax.set_xlabel("Timesteps")
+
+
+def _settled_level(values, frac=0.2):
+    """Mean of the final `frac` of a series — the converged resting level."""
+    arr = np.asarray(values, float)
+    arr = arr[np.isfinite(arr)]
+    if not len(arr):
+        return float("nan")
+    return float(np.mean(arr[-max(1, int(len(arr) * frac)):]))
+
+
+def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=None):
+    """Three SEPARATE, single-axis figures (each a standalone PNG):
+
+      fig1 — output quantity (MW) per firm vs timesteps, with the true sampled
+             exploration envelope shaded.
+      fig2 — the combined collusion index Δ (0 = Nash, 1 = Monopoly).
+      fig3 — the average clearing price (LMP), shaded with the SAME within-rollout
+             sampling envelope as the generation plot (the price-side exploration).
+
+    All three start at the competitive t=0 anchor and carry consistent
+    Competitive / Nash / Monopoly references.
     """
     h = history_label if history_label is not None else config.get("history_len", "?")
-    max_steps = 2_000_000
+    n = len(sessions)
+    max_steps, calvano_xticks = _calvano_x_axis(sessions)
     comp, mono = _firm_comp_mono_total_mw(config)
+    nash = _firm_bench_totals(config, "cournot_nash") or {}
 
     use_greedy = _metrics_has_key(sessions, "firm_0_greedy_gen")
     gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
     if _metrics_has_key(sessions, "greedy_delta_combined"):
-        dkey = "greedy_delta_combined"
-        dkey_per_firm = None
+        dkey, dkey_per_firm = "greedy_delta_combined", None
     elif _metrics_has_key(sessions, "delta_combined"):
-        dkey = "delta_combined"
-        dkey_per_firm = None
+        dkey, dkey_per_firm = "delta_combined", None
     else:
         dkey = None
         dkey_per_firm = (
@@ -379,83 +583,128 @@ def plot_calvano_paper_figures(config, sessions, save_dir: Path, history_label=N
             else "firm_{}_delta"
         )
 
-    fig1, ax1 = plt.subplots(figsize=(10, 5))
-    for fid in range(2):
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''}"
+    has_spread = _metrics_has_key(sessions, "firm_0_gen_lo")
+    per_firm_bench = {
+        f: (comp.get(f), nash.get(f), mono.get(f))
+        for f in _config_firm_structure(config)
+    }
+
+    # --------------------- Fig 1: ONE generation figure PER FIRM ---------------------
+    # Each firm's output gets its own axis (never shared) with its own exploration
+    # shading and its own competitive / Nash / monopoly references.
+    for fid in range(NUM_FIRMS):
         steps, mean, std = aggregate_metric(sessions, gkey.format(fid), max_steps=max_steps)
         if not steps:
             continue
-        c = f"C{fid}"
-        ax1.plot(steps, mean, color=c, label=f"Firm {fid} (greedy mean MW)" if use_greedy else f"Firm {fid}")
-        if len(sessions) > 1:
-            ax1.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
+        c = FIRM_COLORS[fid]
+        fig1, ax1 = plt.subplots(figsize=(11, 6))
+        if has_spread:
+            xs, lo, _ = aggregate_metric(sessions, f"firm_{fid}_gen_lo", max_steps=max_steps)
+            _, hi, _ = aggregate_metric(sessions, f"firm_{fid}_gen_hi", max_steps=max_steps)
+            if xs:
+                ax1.fill_between(xs, lo, hi, color=c, alpha=0.12, lw=0,
+                                 label="sampled range (exploration)")
+        if n > 1:
+            ax1.fill_between(steps, mean - std, mean + std, alpha=0.22, color=c, lw=0,
+                             label="±1 std across sessions")
+        ax1.plot(steps, mean, color=c, lw=2.5, label=f"{FIRM_NAMES[fid]} mean output", zorder=4)
+        ax1.scatter([steps[0]], [mean[0]], color=ANCHOR_RED, s=44, zorder=6,
+                    edgecolor="white", linewidth=0.8, label="t=0 competitive start")
+        cmp_v, nsh_v, mono_v = per_firm_bench.get(fid, (None, None, None))
+        for v, kind, nm in ((cmp_v, "competitive", "Competitive"),
+                            (nsh_v, "nash", "Nash"),
+                            (mono_v, "monopoly", "Monopoly")):
+            _benchmark_hline(ax1, v, kind, f"{nm} ({v:.0f} MW)" if v is not None else nm)
+        _calvano_time_axis(ax1, max_steps, calvano_xticks)
+        ax1.set_ylabel("Output quantity (MW)")
+        _title_block(ax1, f"{FIRM_NAMES[fid]} output converges into the Nash↔Monopoly band", sub)
+        _polish(ax1)
+        _settled_badge(ax1, f"Settled ≈ {_settled_level(mean):.0f} MW")
+        _legend(ax1, loc="best")
+        fig1.tight_layout()
+        _save(fig1, save_dir, f"calvano_fig1_quantities_firm{fid}_h{h}.png")
 
-    ax1.axhline(comp[0], ls="--", color="C0", alpha=0.55, linewidth=1.0, label="Competitive (F0)")
-    ax1.axhline(comp[1], ls="--", color="C1", alpha=0.55, linewidth=1.0, label="Competitive (F1)")
-    ax1.axhline(mono[0], ls=":", color="C0", alpha=0.75, linewidth=1.2, label="Monopoly (F0)")
-    ax1.axhline(mono[1], ls=":", color="C1", alpha=0.75, linewidth=1.2, label="Monopoly (F1)")
-    ax1.set_xlim(0, max_steps)
-    ax1.set_xticks(CALVANO_XTICKS)
-    ax1.xaxis.set_major_formatter(_calvano_xtick_formatter())
-    ax1.set_xlabel("Timesteps")
-    ax1.set_ylabel("Quantity (MW)")
-    ax1.set_title(
-        "Evolution of greedy output levels (mean deterministic policy on rollout obs)"
-        + ("" if use_greedy else " — fallback: realized avg gen (re-run with new ppo.py)")
-    )
-    ax1.legend(fontsize=7, loc="best")
-    fig1.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
-    fig1.tight_layout()
-    out1 = save_dir / f"calvano_fig1_quantities_h{h}.png"
-    fig1.savefig(out1, dpi=150, bbox_inches="tight")
-    plt.close(fig1)
-    print(f"Saved → {out1}")
-
-    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    # ------------------------------------------------------------------ Fig 2
+    fig2, ax2 = plt.subplots(figsize=(11, 6))
     y_hi = 1.15
+    final_delta = None
     if dkey_per_firm is None:
         steps, mean, std = aggregate_metric(sessions, dkey, max_steps=max_steps)
         if steps:
-            ax2.plot(steps, mean, color="black", label="Δ combined (market)")
-            if len(sessions) > 1:
-                ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color="black")
+            if n > 1:
+                ax2.fill_between(steps, mean - std, mean + std, alpha=0.18,
+                                 color="#3a3a3a", lw=0, label="±1 std across sessions")
                 y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
             else:
                 y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
+            ax2.plot(steps, mean, color="#222222", lw=2.6, label="Δ combined (market)", zorder=4)
+            final_delta = _settled_level(mean)
     else:
-        for fid in range(2):
-            steps, mean, std = aggregate_metric(
-                sessions, dkey_per_firm.format(fid), max_steps=max_steps
-            )
+        for fid in range(NUM_FIRMS):
+            steps, mean, std = aggregate_metric(sessions, dkey_per_firm.format(fid), max_steps=max_steps)
             if not steps:
                 continue
-            c = f"C{fid}"
-            ax2.plot(steps, mean, color=c, label=f"Firm {fid} Δ (legacy)")
-            if len(sessions) > 1:
-                ax2.fill_between(steps, mean - std, mean + std, alpha=0.15, color=c)
+            ax2.plot(steps, mean, color=FIRM_COLORS[fid], lw=2.2, label=f"{FIRM_NAMES[fid]} Δ (legacy)")
+            if n > 1:
+                ax2.fill_between(steps, mean - std, mean + std, alpha=0.16, color=FIRM_COLORS[fid], lw=0)
                 y_hi = max(y_hi, float(np.nanmax(mean + std)) * 1.08)
-            else:
-                y_hi = max(y_hi, float(np.nanmax(mean)) * 1.08)
 
-    ax2.axhline(0, ls="--", color="grey", alpha=0.6, linewidth=0.9, label="Nash (Δ=0)")
-    ax2.axhline(1, ls="--", color="black", alpha=0.6, linewidth=0.9, label="Monopoly (Δ=1)")
-    ax2.set_xlim(0, max_steps)
-    ax2.set_xticks(CALVANO_XTICKS)
-    ax2.xaxis.set_major_formatter(_calvano_xtick_formatter())
-    ax2.set_xlabel("Timesteps")
-    ax2.set_ylabel("Combined collusion index Δ")
-    ax2.set_title(
-        "Combined Δ: Σ(π−π^Nash)/Σ(π^Mono−π^Nash)"
-        if dkey_per_firm is None
-        else "Evolution of Δ (legacy per-firm series)"
+    ax2.axhline(0, color=BENCH_STYLE["nash"][0], ls=BENCH_STYLE["nash"][1], lw=1.7, alpha=0.9,
+                label="Nash (Δ = 0)")
+    ax2.axhline(1, color=BENCH_STYLE["monopoly"][0], ls=BENCH_STYLE["monopoly"][1], lw=1.7, alpha=0.9,
+                label="Monopoly (Δ = 1)")
+    _calvano_time_axis(ax2, max_steps, calvano_xticks)
+    ax2.set_ylabel("Combined collusion index  Δ")
+    _title_block(
+        ax2, "Profits settle between competition and full collusion",
+        r"$\Delta=\sum(\pi-\pi^{Nash})\,/\,\sum(\pi^{Mono}-\pi^{Nash})$   ·   " + sub,
     )
     ax2.set_ylim(-0.1, max(y_hi, 1.15))
-    ax2.legend(fontsize=8, loc="best")
-    fig2.suptitle(f"Algorithmic collusion style — H={h} ({len(sessions)} sessions)", fontsize=12, y=1.02)
+    _polish(ax2)
+    if final_delta is not None and np.isfinite(final_delta):
+        _settled_badge(ax2, f"Settled Δ ≈ {final_delta:.2f}\n({final_delta*100:.0f}% of the way\nto full monopoly)")
+    _legend(ax2, loc="center right")
     fig2.tight_layout()
-    out2 = save_dir / f"calvano_fig2_profit_gain_h{h}.png"
-    fig2.savefig(out2, dpi=150, bbox_inches="tight")
-    plt.close(fig2)
-    print(f"Saved → {out2}")
+    _save(fig2, save_dir, f"calvano_fig2_profit_gain_h{h}.png")
+
+    # ------------------------------------------------------------------ Fig 3
+    fig3, ax3 = plt.subplots(figsize=(11, 6))
+    steps, mean, std = aggregate_metric(sessions, "avg_lmp", max_steps=max_steps)
+    has_lmp_spread = _metrics_has_key(sessions, "lmp_lo")
+    lmp_color = "#6a2c91"
+    if steps:
+        # Same shading recipe as the generation plot: the within-rollout sampled
+        # min–max envelope (true price exploration), then the cross-session ±std.
+        if has_lmp_spread:
+            xs, lo, _ = aggregate_metric(sessions, "lmp_lo", max_steps=max_steps)
+            _, hi, _ = aggregate_metric(sessions, "lmp_hi", max_steps=max_steps)
+            if xs:
+                ax3.fill_between(xs, lo, hi, color=lmp_color, alpha=0.12, lw=0,
+                                 label="sampled range (price exploration)")
+        if n > 1:
+            ax3.fill_between(steps, mean - std, mean + std, alpha=0.22, color=lmp_color, lw=0,
+                             label="±1 std across sessions")
+        ax3.plot(steps, mean, color=lmp_color, lw=2.6, label="Avg LMP (clearing price)", zorder=4)
+        ax3.scatter([steps[0]], [mean[0]], color=ANCHOR_RED, s=42, zorder=6,
+                    edgecolor="white", linewidth=0.8, label="t=0 competitive start")
+
+    bench = config.get("benchmarks", {})
+    for key, kind, nm in (("competitive", "competitive", "Competitive"),
+                          ("cournot_nash", "nash", "Nash"),
+                          ("monopoly", "monopoly", "Monopoly")):
+        v = bench.get(key, {}).get("avg_lmp")
+        if v is not None:
+            _benchmark_hline(ax3, v, kind, f"{nm} (${float(v):.1f})")
+    _calvano_time_axis(ax3, max_steps, calvano_xticks)
+    ax3.set_ylabel("Average LMP ($/MWh)")
+    _title_block(ax3, "Clearing price rises above competition and holds", sub)
+    _polish(ax3)
+    if steps:
+        _settled_badge(ax3, f"Settled price ≈ ${_settled_level(mean):.1f}/MWh")
+    _legend(ax3, loc="best")
+    fig3.tight_layout()
+    _save(fig3, save_dir, f"calvano_fig3_lmp_h{h}.png")
 
 
 def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
@@ -496,9 +745,9 @@ def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
 
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # —— Quantities: Firm 0 | Firm 1 ——
-    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))
-    for fid in range(2):
+    # —— Quantities: one panel per firm ——
+    fig1, axes1 = plt.subplots(1, NUM_FIRMS, figsize=(7 * NUM_FIRMS, 5))
+    for fid in range(NUM_FIRMS):
         ax = axes1[fid]
         for i, (config, sessions) in enumerate(runs):
             h = config.get("history_len", "?")
@@ -538,10 +787,10 @@ def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
     plt.close(fig1)
     print(f"Saved → {out1}")
 
-    # —— Normalized profit Δ: Firm 0 | Firm 1 ——
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
+    # —— Normalized profit Δ: one panel per firm ——
+    fig2, axes2 = plt.subplots(1, NUM_FIRMS, figsize=(7 * NUM_FIRMS, 5))
     y_hi = 1.15
-    for fid in range(2):
+    for fid in range(NUM_FIRMS):
         ax = axes2[fid]
         for i, (config, sessions) in enumerate(runs):
             h = config.get("history_len", "?")
@@ -583,17 +832,10 @@ def plot_calvano_cross_history_comparison(run_dirs, save_dir: Path):
 
 # ====================== Figure 1: Generation evolution ======================
 def plot_generation(ax, config, sessions, label_suffix=""):
-    bench = config["benchmarks"]
-    comp_gens = bench["competitive"]["gens"]
-    mono_gens = bench["monopoly"]["gens"]
+    comp_t = _firm_bench_totals(config, "competitive") or {}
+    mono_t = _firm_bench_totals(config, "monopoly") or {}
 
-    # Firm 0 total gen: plant 0 + plant 1
-    comp_g0 = comp_gens[0] + comp_gens[1]
-    comp_g1 = comp_gens[2]
-    mono_g0 = mono_gens[0] + mono_gens[1]
-    mono_g1 = mono_gens[2]
-
-    for fid, (_comp_g, _mono_g) in enumerate([(comp_g0, mono_g0), (comp_g1, mono_g1)]):
+    for fid in range(NUM_FIRMS):
         steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_avg_gen")
         if not steps:
             continue
@@ -603,10 +845,10 @@ def plot_generation(ax, config, sessions, label_suffix=""):
         if len(sessions) > 1:
             ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
 
-    ax.axhline(comp_g0, ls="--", color="C0", alpha=0.4, linewidth=0.8)
-    ax.axhline(comp_g1, ls="--", color="C1", alpha=0.4, linewidth=0.8)
-    ax.axhline(mono_g0, ls=":", color="C0", alpha=0.4, linewidth=0.8)
-    ax.axhline(mono_g1, ls=":", color="C1", alpha=0.4, linewidth=0.8)
+    for fid, v in comp_t.items():
+        ax.axhline(v, ls="--", color=f"C{fid}", alpha=0.4, linewidth=0.8)
+    for fid, v in mono_t.items():
+        ax.axhline(v, ls=":", color=f"C{fid}", alpha=0.4, linewidth=0.8)
 
     ax.set_ylabel("Avg Generation (MW)")
     ax.set_title("Evolution of Generation Quantities")
@@ -622,7 +864,7 @@ def plot_delta(ax, config, sessions, label_suffix=""):
             if len(sessions) > 1:
                 ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color="black")
     else:
-        for fid in range(2):
+        for fid in range(NUM_FIRMS):
             steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_delta")
             if not steps:
                 continue
@@ -640,14 +882,14 @@ def plot_delta(ax, config, sessions, label_suffix=""):
 
 # ====================== Figure 3: Limit strategy ======================
 def plot_limit_strategy(ax, config, sessions):
-    all_grids, all_strats = {str(f): [] for f in range(2)}, None
+    all_grids, all_strats = {str(f): [] for f in range(NUM_FIRMS)}, None
 
     for sess in sessions:
         ls = sess.get("limit_strategy")
         if not ls:
             continue
         grid = ls["lmp_grid"]
-        for fid_str in ["0", "1"]:
+        for fid_str in [str(f) for f in range(NUM_FIRMS)]:
             all_grids[fid_str].append(ls["strategies"][fid_str])
 
     if not all_grids["0"]:
@@ -656,7 +898,8 @@ def plot_limit_strategy(ax, config, sessions):
 
     grid = sessions[0]["limit_strategy"]["lmp_grid"]
 
-    for fid_str, color in [("0", "C0"), ("1", "C1")]:
+    for fid in range(NUM_FIRMS):
+        fid_str, color = str(fid), f"C{fid}"
         matrix = np.array(all_grids[fid_str])
         mean = matrix.mean(axis=0)
         ax.plot(grid, mean, color=color, label=f"Firm {fid_str}")
@@ -664,11 +907,9 @@ def plot_limit_strategy(ax, config, sessions):
             std = matrix.std(axis=0)
             ax.fill_between(grid, mean - std, mean + std, alpha=0.15, color=color)
 
-    # Reference lines
-    bench = config["benchmarks"]
-    comp_gens = bench["competitive"]["gens"]
-    ax.axhline(comp_gens[0] + comp_gens[1], ls="--", color="C0", alpha=0.3, linewidth=0.8)
-    ax.axhline(comp_gens[2], ls="--", color="C1", alpha=0.3, linewidth=0.8)
+    # Reference lines: per-firm competitive totals (plants summed via mapping)
+    for fid, v in (_firm_bench_totals(config, "competitive") or {}).items():
+        ax.axhline(v, ls="--", color=f"C{fid}", alpha=0.3, linewidth=0.8)
 
     ax.set_xlabel("Observed Avg LMP ($/MWh)")
     ax.set_ylabel("Generation (MW)")
@@ -680,21 +921,26 @@ def plot_limit_strategy(ax, config, sessions):
 def plot_impulse_response(axes, config, sessions):
     """Two subplots: one for each firm deviating."""
     for dev_fid, ax in enumerate(axes):
-        traces = {str(f): [] for f in range(2)}
+        traces = {str(f): [] for f in range(NUM_FIRMS)}
+        dev_idxs = []
         for sess in sessions:
             de = sess.get("deviation_experiment", {})
             entry = de.get(str(dev_fid))
             if not entry:
                 continue
-            for fid_str in ["0", "1"]:
+            for fid_str in [str(f) for f in range(NUM_FIRMS)]:
                 traces[fid_str].append(entry["gen"][fid_str])
+            if entry.get("dev_index") is not None:
+                dev_idxs.append(int(entry["dev_index"]))
 
         if not traces["0"]:
             ax.text(0.5, 0.5, "No deviation data", transform=ax.transAxes, ha="center")
             continue
 
         horizon = len(traces["0"][0])
-        t = np.arange(horizon)
+        di = int(round(np.mean(dev_idxs))) if dev_idxs else 0
+        t = np.arange(horizon) - di
+        ax.axvline(0, color="red", ls="--", alpha=0.45, lw=0.9)
 
         for fid_str, color in [("0", "C0"), ("1", "C1")]:
             matrix = np.array(traces[fid_str])
@@ -729,10 +975,12 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
         print("No sessions for deviation explainer.")
         return
 
-    num_firms = 2
+    num_firms = NUM_FIRMS
     gen_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
     lmp_by_dev = {str(d): [] for d in range(num_firms)}
     resting_by_dev = {str(d): {str(f): [] for f in range(num_firms)} for d in range(num_firms)}
+    devidx_by_dev = {str(d): [] for d in range(num_firms)}
+    punish_by_dev = {str(d): [] for d in range(num_firms)}
 
     for sess in sessions:
         de = sess.get("deviation_experiment", {}) or {}
@@ -749,6 +997,10 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
             lmp = entry.get("lmp")
             if lmp:
                 lmp_by_dev[dev_str].append(np.asarray(lmp, dtype=float))
+            if entry.get("dev_index") is not None:
+                devidx_by_dev[dev_str].append(int(entry["dev_index"]))
+            if entry.get("punishment") is not None:
+                punish_by_dev[dev_str].append(entry["punishment"])
 
     deviators = sorted(
         [d for d in gen_by_dev if any(gen_by_dev[d][f] for f in gen_by_dev[d])],
@@ -764,20 +1016,30 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
     mono_lmp = bench.get("monopoly", {}).get("avg_lmp")
     dev_frac = float(config.get("deviation_frac", 0.20))
 
-    n_cols = len(deviators)
-    fig, axes = plt.subplots(2, n_cols, figsize=(7.0 * n_cols, 8.0), squeeze=False)
-    fig.suptitle(
-        "Deviation experiment — does a unilateral output increase trigger a price war?  "
-        f"(H={h}, {len(sessions)} sessions)",
-        fontsize=13,
-        y=1.0,
-    )
+    n = len(sessions)
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''}"
 
-    for col, dev_str in enumerate(deviators):
-        gen_ax = axes[0, col]
-        lmp_ax = axes[1, col]
+    for dev_str in deviators:
+        # Deviation index (pre-deviation resting periods sit at negative time).
+        di = int(round(np.mean(devidx_by_dev[dev_str]))) if devidx_by_dev[dev_str] else 0
 
-        # ---- Generation panel ----
+        # Punishment summary across sessions (the RIVALS' combined reaction).
+        punishes = punish_by_dev[dev_str]
+        punish_txt = ""
+        accommodates = True
+        if punishes:
+            frac = float(np.mean([1.0 if p.get("punished") else 0.0 for p in punishes]))
+            inc = float(np.mean([p.get("rival_output_increase_mw", 0.0) for p in punishes]))
+            drop = float(np.mean([p.get("lmp_drop", 0.0) for p in punishes]))
+            accommodates = frac < 0.5
+            verdict = ("PUNISHMENT — rivals flood, price war" if not accommodates
+                       else "ACCOMMODATION — no retaliation")
+            punish_txt = (
+                f"Rivals retaliated in {frac:.0%} of seeds\n"
+                f"combined rival output {inc:+.1f} MW · price -${drop:.2f}\n{verdict}"
+            )
+
+        # ---- Generation response: ONE figure per firm (deviator and rivals never share an axis) ----
         for fstr in [str(f) for f in range(num_firms)]:
             mats = gen_by_dev[dev_str][fstr]
             if not mats:
@@ -786,119 +1048,115 @@ def plot_deviation_explainer(config, sessions, save_dir: Path, history_label=Non
             matrix = np.stack([arr[:T] for arr in mats])
             mean = matrix.mean(axis=0)
             std = matrix.std(axis=0)
-            t = np.arange(T)
+            t = np.arange(T) - di
             is_dev = fstr == dev_str
-            color = f"C{int(fstr)}"
-            lw = 2.2 if is_dev else 1.6
-            ls = "-" if is_dev else "--"
-            lbl = f"Firm {fstr}" + (" — deviator" if is_dev else " — rival (response)")
-            gen_ax.plot(t, mean, color=color, lw=lw, ls=ls, label=lbl)
-            if matrix.shape[0] > 1:
-                gen_ax.fill_between(t, mean - std, mean + std, color=color, alpha=0.15)
+            color = FIRM_COLORS[int(fstr)]
+            role = "deviator" if is_dev else "rival"
 
+            fig, ax = plt.subplots(figsize=(11, 6))
+            if matrix.shape[0] > 1:
+                ax.fill_between(t, mean - std, mean + std, color=color, alpha=0.18, lw=0,
+                                label="±1 std across sessions")
+            ax.plot(t, mean, color=color, lw=2.6, label=f"{FIRM_NAMES[int(fstr)]} output", zorder=4)
             rests = resting_by_dev[dev_str][fstr]
             if rests:
-                gen_ax.axhline(
-                    float(np.mean(rests)),
-                    color=color,
-                    ls=":",
-                    alpha=0.55,
-                    lw=0.9,
-                    label=f"Firm {fstr} resting"
-                    + (" (pre-deviation)" if is_dev else ""),
-                )
+                ax.axhline(float(np.mean(rests)), color=color, ls=":", alpha=0.6, lw=1.2,
+                           label="resting (pre-deviation)")
+            ax.axvline(0, color=ANCHOR_RED, ls="--", alpha=0.65, lw=1.3, label="deviation instant")
+            if is_dev:
+                title = f"{FIRM_NAMES[int(dev_str)]} deviates → its own output (forced +{dev_frac:.0%} spike)"
+                badge = f"t=0: deviator forced +{dev_frac:.0%}\nfor one step, then resumes\nits learned policy"
+            else:
+                title = f"{FIRM_NAMES[int(dev_str)]} deviates → {FIRM_NAMES[int(fstr)]}'s response: retaliate or accommodate?"
+                badge = punish_txt or "rival response"
+            _title_block(ax, title, sub)
+            ax.set_xlabel("Period after deviation")
+            ax.set_ylabel("Total output (MW)")
+            _polish(ax)
+            _settled_badge(ax, badge)
+            _legend(ax, loc="best")
+            fig.tight_layout()
+            _save(fig, save_dir, f"deviation_gen_dev{dev_str}_{role}{fstr}_h{h}.png")
 
-        gen_ax.axvline(0, color="red", ls="--", alpha=0.55, lw=1.0)
-        gen_ax.text(
-            0.02,
-            0.97,
-            f"t=0: deviator forced to +{dev_frac:.0%} for one step,\n"
-            "then both play their learned deterministic policy.",
-            transform=gen_ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=8,
-            color="0.25",
-        )
-        gen_ax.set_title(f"Firm {dev_str} deviates  →  generation response")
-        gen_ax.set_xlabel("Period after deviation")
-        gen_ax.set_ylabel("Total generation (MW)")
-        gen_ax.grid(alpha=0.25)
-        gen_ax.legend(fontsize=8, loc="best")
-
-        # ---- LMP panel ----
+        # ----------------------------- Price (LMP) response figure -----------------
+        fig, ax = plt.subplots(figsize=(11, 6))
         mats = lmp_by_dev[dev_str]
         if mats:
             T = min(len(arr) for arr in mats)
             matrix = np.stack([arr[:T] for arr in mats])
             mean = matrix.mean(axis=0)
             std = matrix.std(axis=0)
-            t = np.arange(T)
-            lmp_ax.plot(t, mean, color="black", lw=1.8, label="Avg LMP (qty-weighted)")
+            t = np.arange(T) - di
             if matrix.shape[0] > 1:
-                lmp_ax.fill_between(t, mean - std, mean + std, color="black", alpha=0.12)
-            if len(mean):
-                lmp_ax.scatter(
-                    [0],
-                    [mean[0]],
-                    color="red",
-                    zorder=5,
-                    s=46,
-                    label=f"At deviation: ${mean[0]:.2f}",
-                )
-                lmp_ax.scatter(
-                    [T - 1],
-                    [mean[-1]],
-                    color="green",
-                    zorder=5,
-                    s=46,
-                    label=f"After {T - 1} steps: ${mean[-1]:.2f}",
-                )
+                ax.fill_between(t, mean - std, mean + std, color="#6a2c91", alpha=0.14, lw=0,
+                                label="±1 std across sessions")
+            ax.plot(t, mean, color="#6a2c91", lw=2.6, label="Avg LMP (qty-weighted)", zorder=4)
+            if di < len(mean):
+                ax.scatter([0], [mean[di]], color=ANCHOR_RED, zorder=6, s=60, edgecolor="white",
+                           linewidth=0.9, label=f"At deviation: ${mean[di]:.2f}")
+                ax.scatter([T - 1 - di], [mean[-1]], color="#2e8b57", zorder=6, s=60,
+                           edgecolor="white", linewidth=0.9,
+                           label=f"After {T - 1 - di} periods: ${mean[-1]:.2f}")
+        _benchmark_hline(ax, comp_lmp, "competitive",
+                         f"Competitive (${comp_lmp:.2f})" if comp_lmp is not None else "Competitive")
+        _benchmark_hline(ax, mono_lmp, "monopoly",
+                         f"Monopoly (${mono_lmp:.2f})" if mono_lmp is not None else "Monopoly")
+        ax.axvline(0, color=ANCHOR_RED, ls="--", alpha=0.65, lw=1.3)
+        _title_block(ax, f"{FIRM_NAMES[int(dev_str)]} deviates → price response", sub)
+        ax.set_xlabel("Period after deviation")
+        ax.set_ylabel("Average LMP ($/MWh)")
+        _polish(ax)
+        _legend(ax, loc="best")
+        fig.tight_layout()
+        _save(fig, save_dir, f"deviation_lmp_firm{dev_str}_h{h}.png")
 
-        if comp_lmp is not None:
-            lmp_ax.axhline(
-                comp_lmp,
-                color="grey",
-                ls="--",
-                lw=1.0,
-                alpha=0.7,
-                label=f"Competitive (${comp_lmp:.2f})",
-            )
-        if mono_lmp is not None:
-            lmp_ax.axhline(
-                mono_lmp,
-                color="black",
-                ls=":",
-                lw=1.0,
-                alpha=0.75,
-                label=f"Monopoly (${mono_lmp:.2f})",
-            )
-
-        lmp_ax.axvline(0, color="red", ls="--", alpha=0.55, lw=1.0)
-        lmp_ax.set_title(f"Firm {dev_str} deviates  →  price response")
-        lmp_ax.set_xlabel("Period after deviation")
-        lmp_ax.set_ylabel("Avg LMP ($/MWh)")
-        lmp_ax.grid(alpha=0.25)
-        lmp_ax.legend(fontsize=8, loc="best")
-
-    fig.text(
-        0.01,
-        0.005,
-        "Reading guide: at t=0 the deviator is forced above its resting output. "
-        "If the rival accommodates (no punishment) its curve stays near its resting line "
-        "and avg LMP reverts toward the pre-deviation level within a few periods. "
-        "Persistent price drops well below the resting LMP would indicate a price-war response.",
-        fontsize=8,
-        color="0.30",
-    )
-
-    fig.tight_layout(rect=(0, 0.04, 1, 0.97))
-
-    save_dir.mkdir(parents=True, exist_ok=True)
-    out = save_dir / f"deviation_explainer_h{h}.png"
-    fig.savefig(out, dpi=170, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved → {out}")
+        # ------------------- Profit response: did the cheat pay? -------------------
+        # Deviator profit (solid) vs combined rivals (dashed). Punishment shows as
+        # the deviator's post-cheat profit dipping BELOW its resting level — the
+        # one-shot cheat gain gets wiped out by the rivals' response.
+        prof_by_firm = {}
+        for sess in sessions:
+            de = sess.get("deviation_experiment", {}) or {}
+            entry = de.get(dev_str) or {}
+            for fstr, tr in (entry.get("profit") or {}).items():
+                prof_by_firm.setdefault(fstr, []).append(np.asarray(tr, dtype=float))
+        if prof_by_firm.get(dev_str):
+            fig, ax = plt.subplots(figsize=(11, 6))
+            T = min(len(a) for mats in prof_by_firm.values() for a in mats)
+            t = np.arange(T) - di
+            dmat = np.stack([a[:T] for a in prof_by_firm[dev_str]])
+            dmean, dstd = dmat.mean(axis=0), dmat.std(axis=0)
+            dcol = FIRM_COLORS[int(dev_str)]
+            if dmat.shape[0] > 1:
+                ax.fill_between(t, dmean - dstd, dmean + dstd, color=dcol, alpha=0.15, lw=0)
+            ax.plot(t, dmean, color=dcol, lw=2.6, zorder=4,
+                    label=f"{FIRM_NAMES[int(dev_str)]} profit (deviator)")
+            rmats = [np.stack([a[:T] for a in prof_by_firm[f]])
+                     for f in prof_by_firm if f != dev_str]
+            if rmats:
+                rsum = np.sum([m.mean(axis=0) for m in rmats], axis=0)
+                ax.plot(t, rsum, color="#666666", lw=1.8, ls="--",
+                        label="Rivals combined profit")
+            if di > 0:
+                ax.axhline(float(dmean[:di].mean()), color=dcol, ls=":", alpha=0.6, lw=1.2,
+                           label="deviator resting profit")
+            ax.axvline(0, color=ANCHOR_RED, ls="--", alpha=0.65, lw=1.3, label="deviation instant")
+            badge = ""
+            if punishes:
+                cg = float(np.mean([p.get("dev_cheat_gain", 0.0) for p in punishes]))
+                pl = float(np.mean([p.get("dev_punishment_loss", 0.0) for p in punishes]))
+                badge = (f"one-shot cheat gain {cg:+.0f} $/step\n"
+                         f"worst post-cheat shortfall {pl:+.0f} $/step\n"
+                         + ("cheating does NOT pay" if pl > cg else "cheating pays (no deterrent)"))
+            _title_block(ax, f"{FIRM_NAMES[int(dev_str)]} deviates → profit response (does cheating pay?)", sub)
+            ax.set_xlabel("Period after deviation")
+            ax.set_ylabel("Profit ($/step)")
+            _polish(ax)
+            if badge:
+                _settled_badge(ax, badge)
+            _legend(ax, loc="best")
+            fig.tight_layout()
+            _save(fig, save_dir, f"deviation_profit_firm{dev_str}_h{h}.png")
 
 
 # ====================== Figure 5: KL divergence evolution ======================
@@ -912,7 +1170,7 @@ def plot_kl(ax, config, sessions, label_suffix=""):
     lag_k = int(config.get("policy_kl_lag", 0) or 0)
     use_lag = lag_k > 0 and _metrics_has_key(sessions, "firm_0_kl_lag")
 
-    for fid in range(2):
+    for fid in range(NUM_FIRMS):
         steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_kl")
         if not steps:
             continue
@@ -1083,18 +1341,20 @@ def plot_comparison(run_dirs, save_dir=None):
     ax.set_title("Generation — Firm 0")
     ax.legend(fontsize=8)
 
-    # --- (1,2): Generation per H (Firm 1) ---
+    # --- (1,2): Generation per H (Firms 1 solid & 2 dashed) ---
     ax = axes[1, 2]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_1_avg_gen")
-        if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
-            if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+        for fid, ls in ((1, "-"), (2, "--")):
+            steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_avg_gen")
+            if steps:
+                ax.plot(steps, mean, color=color, ls=ls,
+                        label=f"H={h} F{fid}" if fid == 1 else None)
+                if len(sessions) > 1:
+                    ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
     ax.set_ylabel("Avg Generation (MW)")
-    ax.set_title("Generation — Firm 1")
+    ax.set_title("Generation — Firm 1 (—) & Firm 2 (--)")
     ax.legend(fontsize=8)
 
     for row in axes:
@@ -1260,21 +1520,23 @@ def plot_comparison_delta(run_dirs, save_dir=None):
     ax.set_title("Generation — Firm 0")
     ax.legend(fontsize=8)
 
-    # --- (1,1): Generation Firm 1 ---
+    # --- (1,1): Generation Firms 1 (solid) & 2 (dashed) ---
     ax = axes[1, 1]
     for config, sessions in runs:
         h = config.get("history_len", "?")
         color = colors_h[str(h)]
-        steps, mean, std = aggregate_metric(sessions, "firm_1_avg_gen")
-        if steps:
-            ax.plot(steps, mean, color=color, label=f"H={h}")
-            if len(sessions) > 1:
-                ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
+        for fid, ls in ((1, "-"), (2, "--")):
+            steps, mean, std = aggregate_metric(sessions, f"firm_{fid}_avg_gen")
+            if steps:
+                ax.plot(steps, mean, color=color, ls=ls,
+                        label=f"H={h} F{fid}" if fid == 1 else None)
+                if len(sessions) > 1:
+                    ax.fill_between(steps, mean - std, mean + std, alpha=0.1, color=color)
     ax.set_ylabel("Avg Generation (MW)")
-    ax.set_title("Generation — Firm 1")
+    ax.set_title("Generation — Firm 1 (—) & Firm 2 (--)")
     ax.legend(fontsize=8)
 
-    # --- (1,2): total profit per step (F0 + F1 episode profit / episode_len) ---
+    # --- (1,2): total profit per step (all firms' episode profit / episode_len) ---
     ax = axes[1, 2]
     for config, sessions in runs:
         h = config.get("history_len", "?")
@@ -1285,10 +1547,12 @@ def plot_comparison_delta(run_dirs, save_dir=None):
             for row in sess.get("metrics") or []:
                 if "step" not in row:
                     continue
-                p0 = row.get("firm_0_ep_profit", 0) / ep_len
-                p1 = row.get("firm_1_ep_profit", 0) / ep_len
+                total = sum(
+                    row.get(f"firm_{f}_ep_profit", 0) / ep_len
+                    for f in range(NUM_FIRMS)
+                )
                 steps_list.append(row["step"])
-                totals.append(p0 + p1)
+                totals.append(total)
         if steps_list:
             ax.plot(steps_list, totals, color=color, alpha=0.5, label=f"H={h} (per session)")
     bench = runs[0][0].get("benchmarks", {})
@@ -1411,6 +1675,365 @@ def plot_generation_profit_comparison(run_dirs, save_dir: Path):
     print(f"Saved → {out}")
 
 
+def plot_variance_funnel(config, sessions, save_dir: Path, history_label=None):
+    """Cross-session generation band vs PPO iteration (log-x), plus band width (std).
+
+    Surfaces the early high-variance fan-out: every session starts at the (pinned)
+    competitive point, so the band is thin at iteration 1, widens sharply as sessions
+    diverge during early learning, then narrows as they converge. Top row = mean ± std
+    bands; bottom row = the cross-session std (band width) over iterations.
+    """
+    if not sessions:
+        print("No sessions for variance funnel.")
+        return
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    use_greedy = (
+        not _metrics_has_key(sessions, "firm_0_avg_gen")
+        and _metrics_has_key(sessions, "firm_0_greedy_gen")
+    )
+    gkey = "firm_{}_greedy_gen" if use_greedy else "firm_{}_avg_gen"
+    levels = _firm_benchmark_levels(config)
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''}"
+
+    series = {}
+    for fid in range(NUM_FIRMS):
+        x, mean, std = _aggregate_metric_by_iteration(sessions, gkey.format(fid))
+        series[fid] = (np.asarray(x, float), np.asarray(mean, float), np.asarray(std, float)) if x else None
+
+    # --- One standalone cross-session BAND figure per firm (its own MW scale) ---
+    for fid in range(NUM_FIRMS):
+        if series[fid] is None:
+            continue
+        x, mean, std = series[fid]
+        c = FIRM_COLORS[fid]
+        fig, ax = plt.subplots(figsize=(11, 6))
+        if n > 1:
+            ax.fill_between(x, mean - std, mean + std, color=c, alpha=0.22, lw=0,
+                            label="±1 std across sessions")
+        ax.plot(x, mean, color=c, lw=2.4, label=f"{FIRM_NAMES[fid]} mean (across sessions)", zorder=4)
+        for kind, nm in (("competitive", "Competitive"), ("nash", "Nash"), ("monopoly", "Monopoly")):
+            _benchmark_hline(ax, levels.get(fid, {}).get(kind), kind, nm)
+        ax.set_xscale("log")
+        _title_block(ax, f"{FIRM_NAMES[fid]} cross-session fan-out: diverge early, re-converge late", sub)
+        ax.set_xlabel("PPO iteration (log scale)")
+        ax.set_ylabel("Output quantity (MW)")
+        ax.grid(True, which="both", alpha=0.5)
+        _polish(ax)
+        _legend(ax, loc="best")
+        fig.tight_layout()
+        _save(fig, save_dir, f"variance_band_firm{fid}_h{h}.png")
+
+    # --- One standalone BAND-WIDTH (std) figure PER FIRM (never shared) ---
+    for fid in range(NUM_FIRMS):
+        if series[fid] is None:
+            continue
+        x, _, std = series[fid]
+        c = FIRM_COLORS[fid]
+        fig, ax = plt.subplots(figsize=(11, 6))
+        ax.fill_between(x, 0, std, color=c, alpha=0.20, lw=0)
+        ax.plot(x, std, color=c, lw=2.5, label=f"{FIRM_NAMES[fid]} band width (std)", zorder=4)
+        ax.set_xscale("log")
+        _title_block(ax, f"{FIRM_NAMES[fid]}: cross-session disagreement collapses on convergence", sub)
+        ax.set_xlabel("PPO iteration (log scale)")
+        ax.set_ylabel("Std of output across sessions (MW)")
+        ax.grid(True, which="both", alpha=0.5)
+        _polish(ax)
+        _legend(ax, loc="best")
+        fig.tight_layout()
+        _save(fig, save_dir, f"variance_std_firm{fid}_h{h}.png")
+
+
+def plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir: Path, history_label=None):
+    """Per-firm profit vs timesteps with that firm's OWN competitive/Nash/monopoly lines.
+
+    Makes the asymmetry explicit: Firm 1's Nash profit can exceed its monopoly profit, so the
+    joint-monopoly allocation is not individually rational for it — which is exactly what
+    bounds the combined Δ below 1.
+    """
+    if not sessions:
+        print("No sessions for per-firm profit plot.")
+        return
+    if not _metrics_has_key(sessions, "firm_0_avg_step_profit"):
+        print("No per-step profit metric (firm_*_avg_step_profit) in sessions.")
+        return
+
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    max_steps, calvano_xticks = _calvano_x_axis(sessions)
+    bench = config.get("benchmarks", {})
+    comp = bench.get("competitive", {}).get("profits", {})
+    nash = bench.get("cournot_nash", {}).get("profits", {})
+    mono = bench.get("monopoly", {}).get("profits", {})
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''}"
+    has_prof_spread = _metrics_has_key(sessions, "firm_0_profit_lo")
+
+    # One standalone figure per firm — each firm's profit has its own scale, so they
+    # never share an axis.
+    for fid in range(NUM_FIRMS):
+        fig, ax = plt.subplots(figsize=(11, 6))
+        c = FIRM_COLORS[fid]
+        x, mean, std = aggregate_metric(sessions, f"firm_{fid}_avg_step_profit", max_steps=max_steps)
+        settled = None
+        if x:
+            x = np.asarray(x, float)
+            mean = np.asarray(mean, float)
+            std = np.asarray(std, float)
+            # Within-rollout sampled profit envelope (the exploration shading), mirroring
+            # the generation and LMP figures.
+            if has_prof_spread:
+                xl, lo, _ = aggregate_metric(sessions, f"firm_{fid}_profit_lo", max_steps=max_steps)
+                xh, hi, _ = aggregate_metric(sessions, f"firm_{fid}_profit_hi", max_steps=max_steps)
+                if xl and xh:
+                    ax.fill_between(np.asarray(xl, float), np.asarray(lo, float),
+                                    np.asarray(hi, float), color=c, alpha=0.12, lw=0,
+                                    label="sampled range (exploration)")
+            if n > 1:
+                ax.fill_between(x, mean - std, mean + std, color=c, alpha=0.22, lw=0,
+                                label="±1 std across sessions")
+            ax.plot(x, mean, color=c, lw=2.4, label=f"{FIRM_NAMES[fid]} profit (mean)", zorder=4)
+            ax.scatter([x[0]], [mean[0]], color=ANCHOR_RED, s=44, zorder=6,
+                       edgecolor="white", linewidth=0.8, label="t=0 competitive start")
+            settled = _settled_level(mean)
+        for table, kind, name in ((comp, "competitive", "Competitive"),
+                                  (nash, "nash", "Nash"),
+                                  (mono, "monopoly", "Monopoly")):
+            if str(fid) in table:
+                _benchmark_hline(ax, float(table[str(fid)]), kind,
+                                 f"{name} (${float(table[str(fid)]):,.0f})")
+        _title_block(ax, f"{FIRM_NAMES[fid]} profit vs its own competitive / Nash / monopoly benchmarks", sub)
+        _calvano_time_axis(ax, max_steps, calvano_xticks)
+        ax.set_ylabel("Profit ($/step)")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
+        _polish(ax)
+        if settled is not None and np.isfinite(settled):
+            _settled_badge(ax, f"Settled ≈ ${settled:,.0f}/step")
+        _legend(ax, loc="best")
+        fig.tight_layout()
+        _save(fig, save_dir, f"per_firm_profit_firm{fid}_h{h}.png")
+
+
+def plot_exploration_funnel(config, sessions, save_dir: Path, history_label=None):
+    """Per-firm exploration funnel: the ACTUAL within-rollout sampled-output spread
+    (min–max shaded + ±std), wide early (haphazard exploration) and narrowing late
+    (exploitation). Starts at the competitive t=0 anchor.
+
+    Uses firm_*_gen_lo/hi/std — what the agents actually TRIED — not the smoothed greedy
+    center or cross-session variance. Produces a full-range figure and an 'extremely
+    zoomed' figure (tight y around the Nash↔Monopoly collusion band) for the advisor.
+    """
+    if not sessions:
+        print("No sessions for exploration funnel.")
+        return
+    if not _metrics_has_key(sessions, "firm_0_gen_std"):
+        print("No sampled-spread metrics (firm_*_gen_std). Re-run ppo.py (it logs them now).")
+        return
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    levels = _firm_benchmark_levels(config)
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''}"
+
+    def agg(fid, k):
+        steps, mean, _ = aggregate_metric(sessions, f"firm_{fid}_{k}")
+        return np.asarray(steps, float), np.asarray(mean, float)
+
+    # One standalone figure per firm, at full range and zoomed to the collusion band.
+    for fid in range(NUM_FIRMS):
+        x, center = agg(fid, "avg_gen")
+        if not len(x):
+            continue
+        _, lo = agg(fid, "gen_lo")
+        _, hi = agg(fid, "gen_hi")
+        _, sd = agg(fid, "gen_std")
+        c = FIRM_COLORS[fid]
+        fl = levels.get(fid, {})
+        comp = fl.get("competitive")
+        nash = fl.get("nash")
+        mono = fl.get("monopoly")
+        settled = _settled_level(center)
+
+        for zoom in (False, True):
+            fig, ax = plt.subplots(figsize=(11, 6))
+            mlh = np.isfinite(lo) & np.isfinite(hi)
+            ax.fill_between(x[mlh], lo[mlh], hi[mlh], color=c, alpha=0.12, lw=0,
+                            label="sampled range (min–max per rollout)")
+            ms = np.isfinite(sd) & np.isfinite(center)
+            ax.fill_between(x[ms], (center - sd)[ms], (center + sd)[ms], color=c, alpha=0.30, lw=0,
+                            label="±1 std (exploration width)")
+            ax.plot(x, center, color=c, lw=2.4, label=f"{FIRM_NAMES[fid]} mean sampled output", zorder=4)
+            for v, kind, nm in ((comp, "competitive", "Competitive"),
+                                (nash, "nash", "Nash"),
+                                (mono, "monopoly", "Monopoly")):
+                _benchmark_hline(ax, v, kind, f"{nm} ({v:.0f} MW)" if v is not None else nm)
+            if len(center):
+                ax.scatter([x[0]], [center[0]], color=ANCHOR_RED, zorder=6, s=46,
+                           edgecolor="white", linewidth=0.8,
+                           label=f"t=0 competitive ({center[0]:.0f} MW)")
+            if zoom:
+                vals = [v for v in (nash, mono, settled) if v is not None and np.isfinite(v)]
+                pad = max(8.0, 0.15 * (max(vals) - min(vals))) if len(vals) > 1 else 10.0
+                ax.set_ylim(min(vals) - pad, max(vals) + pad)
+                title = f"{FIRM_NAMES[fid]} — zoom on the Nash↔Monopoly collusion band"
+            else:
+                finite_hi = hi[np.isfinite(hi)]
+                y_top = max(
+                    float(np.max(finite_hi)) if finite_hi.size else 0.0,
+                    *(v for v in (comp, nash, mono) if v is not None),
+                )
+                ax.set_ylim(-4, y_top + 6)
+                title = f"{FIRM_NAMES[fid]} exploration funnel: wide explore → narrow exploit"
+            ax.set_xlabel("Timesteps")
+            ax.set_ylabel("Output quantity (MW)")
+            _title_block(ax, title, sub)
+            _polish(ax)
+            _settled_badge(ax, f"Settled ≈ {settled:.0f} MW")
+            _legend(ax, loc="best")
+            fig.tight_layout()
+            tag = "_zoom" if zoom else ""
+            _save(fig, save_dir, f"exploration_funnel_firm{fid}{tag}_h{h}.png")
+
+
+# ============ Calvano-2021-style Fig. 3 / Fig. 4 (imperfect monitoring) ============
+def plot_average_limit_strategy(config, sessions, save_dir: Path, history_label=None):
+    """Fig. 3 analogue: the AVERAGE limit strategy across sessions.
+
+    One figure per firm: mean deterministic output as a function of the observed
+    average LMP (the price-state), averaged across sessions (±1 std band), with
+    the aggregate demand lines in the high/low-demand states overlaid (rescaled
+    to the firm level by holding the rival at its Nash total), so the slope of
+    the strategy can be compared with the slope of demand exactly as in the paper.
+    """
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    strat_by_firm, grid = {}, None
+    for sess in sessions:
+        ls = sess.get("limit_strategy") or {}
+        if not ls.get("lmp_grid"):
+            continue
+        grid = np.asarray(ls["lmp_grid"], dtype=float)
+        for fstr, out in (ls.get("strategies") or {}).items():
+            strat_by_firm.setdefault(fstr, []).append(np.asarray(out, dtype=float))
+    if grid is None or not strat_by_firm:
+        print("No limit-strategy data in sessions.")
+        return
+    n = len(sessions)
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''} averaged"
+    agg = config.get("aggregate_demand") or {}
+    u = float(config.get("demand_shock") or 0.0)
+    nash_totals = _firm_bench_totals(config, "cournot_nash") or {}
+
+    for fstr, mats in sorted(strat_by_firm.items()):
+        fid = int(fstr)
+        matrix = np.stack(mats)
+        mean, std = matrix.mean(axis=0), matrix.std(axis=0)
+        c = FIRM_COLORS[fid % len(FIRM_COLORS)]
+        fig, ax = plt.subplots(figsize=(11, 6))
+        # axes as in the paper: x = price(-state), y = output
+        # Individual sessions (thin) — limit strategies are heterogeneous across
+        # sessions; the average alone can mask punishment-sloped sessions.
+        for row in matrix:
+            ax.plot(grid, row, color=c, alpha=0.25, lw=0.9, zorder=2)
+        if matrix.shape[0] > 1:
+            ax.fill_between(grid, mean - std, mean + std, color=c, alpha=0.15, lw=0,
+                            label="±1 std across sessions")
+        ax.plot(grid, mean, color=c, lw=2.8, label="average limit strategy", zorder=4)
+        slopes = np.array([np.polyfit(grid, row, 1)[0] for row in matrix])
+        n_pun = int(np.sum(slopes < -0.1))
+        _settled_badge(ax, (f"mean slope {slopes.mean():+.2f} MW/$\n"
+                            f"{n_pun}/{len(slopes)} sessions punishment-sloped\n"
+                            f"(negative slope = punish low prices)"))
+        # demand lines: p = choke_over_B + u − (g_f + G_rival_Nash)/B  →  g_f(p)
+        if agg and u > 0:
+            rival_nash = sum(v for f2, v in nash_totals.items() if f2 != fid)
+            invB = float(agg.get("inv_B", 0.0))
+            cB = float(agg.get("choke_over_B", 0.0))
+            if invB > 0:
+                for uu, nm, ls_ in ((+u, "high demand", (0, (6, 3))),
+                                    (-u, "low demand", (0, (2, 2)))):
+                    g_line = (cB + uu - grid) / invB - rival_nash
+                    ax.plot(grid, g_line, color="#555555", ls=ls_, lw=1.4, label=nm)
+        _title_block(ax, f"{FIRM_NAMES[fid]} — average limit strategy (output vs price-state)", sub)
+        ax.set_xlabel("Observed avg LMP ($/MWh)")
+        ax.set_ylabel("Deterministic output (MW)")
+        finite = mean[np.isfinite(mean)]
+        if finite.size:
+            lo_y = max(0.0, float(finite.min()) - 25)
+            ax.set_ylim(lo_y, float(finite.max()) + 25)
+        _polish(ax)
+        _legend(ax, loc="best")
+        fig.tight_layout()
+        _save(fig, save_dir, f"fig3_avg_limit_strategy_firm{fid}_h{h}.png")
+
+
+def plot_fig4_deviation(config, sessions, save_dir: Path, history_label=None,
+                        periods: int = 20):
+    """Fig. 4 analogue: session-AVERAGED impulse response to a forced deviation.
+
+    One figure per deviating firm (and per frozen demand state when the run used
+    demand shocks): deviating and non-deviating agents' output vs period 0..N,
+    averaged across sessions, on ONE axis — exactly the layout of Calvano et al.
+    (2021) Figure 4.
+    """
+    h = history_label if history_label is not None else config.get("history_len", "?")
+    n = len(sessions)
+    sub = f"H={h}  ·  {n} session{'s' if n != 1 else ''} averaged"
+
+    def collect(state_key):
+        """{dev_str: {fid_str: [trace, ...]}, ...} plus dev_index list."""
+        out, dev_idx = {}, {}
+        for sess in sessions:
+            if state_key is None:
+                de = sess.get("deviation_experiment") or {}
+            else:
+                de = (sess.get("deviation_experiment_states") or {}).get(state_key) or {}
+            for dev_str, entry in de.items():
+                if not entry:
+                    continue
+                for fstr, tr in (entry.get("gen") or {}).items():
+                    out.setdefault(dev_str, {}).setdefault(fstr, []).append(
+                        np.asarray(tr, dtype=float))
+                dev_idx.setdefault(dev_str, []).append(int(entry.get("dev_index", 0)))
+        return out, dev_idx
+
+    states = ([("low", "Low demand"), ("high", "High demand")]
+              if any(sess.get("deviation_experiment_states") for sess in sessions)
+              else [(None, None)])
+
+    for state_key, state_name in states:
+        traces, dev_idx = collect(state_key)
+        for dev_str in sorted(traces):
+            di = int(round(np.mean(dev_idx[dev_str]))) if dev_idx.get(dev_str) else 0
+            fig, ax = plt.subplots(figsize=(9, 6))
+            for fstr in sorted(traces[dev_str]):
+                mats = traces[dev_str][fstr]
+                T = min(len(a) for a in mats)
+                M = np.stack([a[:T] for a in mats])
+                # x-axis: period 0 = deviation instant, show a couple pre-periods
+                start = max(0, di - 2)
+                end = min(T, di + periods + 1)
+                t = np.arange(start, end) - di
+                mean, std = M.mean(axis=0)[start:end], M.std(axis=0)[start:end]
+                fid = int(fstr)
+                is_dev = fstr == dev_str
+                c = FIRM_COLORS[fid % len(FIRM_COLORS)]
+                if M.shape[0] > 1:
+                    ax.fill_between(t, mean - std, mean + std, color=c, alpha=0.15, lw=0)
+                ax.plot(t, mean, color=c, lw=2.6 if is_dev else 2.0,
+                        ls="-" if is_dev else "--", zorder=4 if is_dev else 3,
+                        label=f"{FIRM_NAMES[fid]} ({'deviating' if is_dev else 'non-deviating'} agent)")
+            ax.axvline(0, color=ANCHOR_RED, ls="--", alpha=0.6, lw=1.2)
+            ttl = f"Deviation by {FIRM_NAMES[int(dev_str)]}"
+            if state_name:
+                ttl += f" — {state_name}"
+            _title_block(ax, ttl, sub)
+            ax.set_xlabel("Period")
+            ax.set_ylabel("Output (MW)")
+            _polish(ax)
+            _legend(ax, loc="best")
+            fig.tight_layout()
+            suffix = f"_{state_key}" if state_key else ""
+            _save(fig, save_dir, f"fig4_deviation_dev{dev_str}{suffix}_h{h}.png")
+
+
 # ====================== Main ======================
 def main():
     parser = argparse.ArgumentParser(description="Calvano-style plots for PPO collusion")
@@ -1440,6 +2063,33 @@ def main():
         "--deviation-explainer",
         action="store_true",
         help="Advisor-friendly impulse-response figure: generation + LMP per deviator (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--fig34",
+        action="store_true",
+        help="Calvano-2021-style figures: Fig 3 (session-averaged limit strategy with "
+        "demand-line overlays) and Fig 4 (session-averaged deviation response, "
+        "~20 periods, per frozen demand state).",
+    )
+    parser.add_argument(
+        "--variance-funnel",
+        action="store_true",
+        help="Cross-session generation band + std vs PPO iteration (log-x): shows the early "
+        "high-variance fan-out narrowing on convergence (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--per-firm-profit",
+        action="store_true",
+        help="Per-firm profit vs PPO iteration with each firm's own competitive/Nash/monopoly "
+        "lines (one PNG per run dir).",
+    )
+    parser.add_argument(
+        "--exploration-funnel",
+        action="store_true",
+        help="Per-firm exploration funnel from the ACTUAL sampled-output spread "
+        "(firm_*_gen_lo/hi/std): wide haphazard exploration narrowing to exploitation. "
+        "Writes a full-range PNG and an extremely-zoomed PNG (tight on the Nash↔Monopoly "
+        "band) per run dir.",
     )
     parser.add_argument("--save", type=str, default=None,
                         help="Directory to save figures (PNG). If omitted, shows interactively.")
@@ -1481,6 +2131,18 @@ def main():
         plot_comparison_delta(run_dirs, save_dir=args.save)
         return
 
+    if args.fig34:
+        if not args.save:
+            parser.error("--fig34 requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_average_limit_strategy(config, sessions, save_dir, history_label=h)
+            plot_fig4_deviation(config, sessions, save_dir, history_label=h)
+        return
+
     if args.deviation_explainer:
         missing = [str(rd) for rd in run_dirs if not rd.is_dir()]
         if missing:
@@ -1493,6 +2155,39 @@ def main():
             config, sessions = load_sessions(rd)
             h = config.get("history_len", "?")
             plot_deviation_explainer(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.variance_funnel:
+        if not args.save:
+            parser.error("--variance-funnel requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_variance_funnel(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.per_firm_profit:
+        if not args.save:
+            parser.error("--per-firm-profit requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_per_firm_profit_vs_benchmarks(config, sessions, save_dir, history_label=h)
+        return
+
+    if args.exploration_funnel:
+        if not args.save:
+            parser.error("--exploration-funnel requires --save DIR")
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for rd in run_dirs:
+            config, sessions = load_sessions(rd)
+            h = config.get("history_len", "?")
+            plot_exploration_funnel(config, sessions, save_dir, history_label=h)
         return
 
     for rd in run_dirs:

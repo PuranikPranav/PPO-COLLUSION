@@ -1,0 +1,9 @@
+# Local AMPL (from repo root):  ampl nash_cournot.run
+model nash_cournot.mod;
+data cournot_data.dat;
+
+option solver path;
+option path_options "convergence_tolerance=1e-8";
+solve;
+
+include nash_cournot_post.run;

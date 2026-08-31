@@ -1,0 +1,30 @@
+# m.run  —  COMMANDS file for the NEOS web form (Joint Monopoly, KNITRO).
+#
+#   Model File    -> m.mod
+#   Data File     -> d.dat
+#   Commands File -> m.run   (this file)
+#
+# IMPORTANT: do NOT set 'option solver' here. NEOS already selects the
+# solver from the KNITRO page you submit on; overriding it with a wrong
+# name makes AMPL fail to find the solver and return all zeros.
+# This file must also contain NO 'model' or 'data' statements.
+
+solve;
+
+# ---------------- post-solve reporting ----------------
+param LMP {i in NODES};
+let {i in NODES} LMP[i] := p_hub + (if i == N then 0 else w[i]);
+
+param Firm_Profit {f in FIRMS};
+let {f in FIRMS} Firm_Profit[f] :=
+    sum {i in NODES : (f,i) in G}
+        (LMP[i]*g[f,i] - (MC[f,i]*g[f,i] + 0.5*QC[f,i]*g[f,i]^2));
+
+param Total_Profit = sum {f in FIRMS} Firm_Profit[f];
+
+printf "\n=== Generation g (MW) ===\n";               display g;
+printf "\n=== Nodal LMP ($/MWh) = p_hub + w_i ===\n";  display LMP;
+printf "\n=== Wheeling fee w (spokes, $/MWh) ===\n";   display w;
+printf "\n=== ISO net injection y (spokes, MW) ===\n"; display y;
+printf "\n=== Firm profit and total ($/step) ===\n";   display Firm_Profit, Total_Profit;
+printf "\nCartel objective = %g\n", Cartel_Profit;

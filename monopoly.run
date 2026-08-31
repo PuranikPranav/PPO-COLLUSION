@@ -1,0 +1,9 @@
+# Local AMPL (from repo root):  ampl monopoly.run
+model monopoly.mod;
+data cournot_data.dat;
+
+option solver knitro;
+option knitro_options "outlev=1 algorithm=3 bar_murule=4";
+solve;
+
+include monopoly_post.run;
